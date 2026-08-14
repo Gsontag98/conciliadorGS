@@ -319,7 +319,11 @@ const App = (function () {
     state.normalizedBank = ColumnMapper.normalizeData(state.rawBankData.rows, state.bankMapping, 'Razão Conta Fornecedor');
 
     if (state.normalizedLedger.length === 0 || state.normalizedBank.length === 0) {
-      alert('Atenção: Nenhum lançamento válido foi encontrado para conciliar. Verifique o mapeamento das colunas Data e Valor.');
+      let diagMsg = 'Atenção: Não foi possível extrair lançamentos válidos de um dos arquivos:\n\n';
+      diagMsg += `• Razão Conta Banco: ${state.normalizedLedger.length} lançamento(s) lido(s)\n`;
+      diagMsg += `• Razão Conta Fornecedor: ${state.normalizedBank.length} lançamento(s) lido(s)\n\n`;
+      diagMsg += 'Por favor, revise o Mapeamento de Colunas (Etapa 2) garantindo que as colunas com a Data e o Valor (ou Débito/Crédito) estejam selecionadas corretamente.';
+      alert(diagMsg);
       return;
     }
 
