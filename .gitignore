@@ -1,7 +1,20 @@
-.DS_Store
+# Dependencies
 node_modules/
-scratch/
-.vercel
-*.log
+dist/
+.env.local
+.env
 
-.vercel
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vercel
+.vercel/
+
+# Scratch
+scratch/
+engine_backup/
