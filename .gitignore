@@ -18,3 +18,5 @@ Thumbs.db
 # Scratch
 scratch/
 engine_backup/
+
+.vercel

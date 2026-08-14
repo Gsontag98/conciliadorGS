@@ -22,12 +22,22 @@ export default function FileDropzone({ type }) {
 
     try {
       const parsed = await parseFile(file);
-      // Use first sheet
-      const sheetName = parsed.sheetNames[0];
-      const sheetData = parsed.sheets[sheetName];
 
-      if (!sheetData || !sheetData.headers || sheetData.rows.length === 0) {
-        throw new Error('Nenhum dado encontrado no arquivo. Verifique se o relatório possui cabeçalhos válidos.');
+      // Search across all sheets for the first sheet that has rows
+      let sheetData = null;
+      let usedSheetName = '';
+
+      for (const name of parsed.sheetNames) {
+        const s = parsed.sheets[name];
+        if (s && s.rows && s.rows.length > 0) {
+          sheetData = s;
+          usedSheetName = name;
+          break;
+        }
+      }
+
+      if (!sheetData || !sheetData.rows || sheetData.rows.length === 0) {
+        throw new Error('Nenhum dado encontrado no arquivo. Verifique se o relatório possui lançamentos e cabeçalhos válidos.');
       }
 
       const mapping = autoDetect(sheetData.headers);
@@ -35,7 +45,7 @@ export default function FileDropzone({ type }) {
       const items = normalizeData(sheetData.rows, mapping, sourceName);
 
       if (items.length === 0) {
-        throw new Error('Nenhum lançamento válido encontrado. Verifique se o arquivo possui datas e valores.');
+        throw new Error(`Nenhum lançamento válido encontrado na aba "${usedSheetName}". Verifique se o relatório possui colunas com datas e valores.`);
       }
 
       const fileData = {
@@ -57,6 +67,7 @@ export default function FileDropzone({ type }) {
 
       addToast(`✅ ${file.name}: ${items.length} lançamentos carregados`, 'success');
     } catch (err) {
+      console.error('File parsing error:', err);
       setError(err.message || 'Erro ao processar arquivo');
       addToast(`❌ Erro: ${err.message}`, 'error');
     }
@@ -130,8 +141,8 @@ export default function FileDropzone({ type }) {
       )}
 
       {error && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, color: 'var(--danger)', fontSize: '0.78rem' }}>
-          <AlertCircle size={14} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, color: 'var(--danger)', fontSize: '0.78rem', textAlign: 'left' }}>
+          <AlertCircle size={14} style={{ minWidth: 14 }} />
           <span>{error}</span>
         </div>
       )}
