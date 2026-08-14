@@ -89,8 +89,8 @@ const Dashboard = (function () {
       tr.className = `row-${row.category}`;
 
       if (row.type === 'match') {
-        const leg = row.match.ledgerItems[0];
         const bnk = row.match.bankItems[0];
+        const leg = row.match.ledgerItems[0];
         const isMulti = row.match.ledgerItems.length > 1 || row.match.bankItems.length > 1;
 
         tr.innerHTML = `
@@ -106,29 +106,29 @@ const Dashboard = (function () {
             <div style="font-size: 0.75rem; color: var(--text-dim);">${leg.description}</div>
             ${isMulti ? `<div style="font-size: 0.7rem; color: var(--accent);">+ ${row.match.ledgerItems.length - 1} item(ns) agrupado(s)</div>` : ''}
           </td>
-          <td class="amount positive">R$ ${bnk.amount.toFixed(2)}</td>
+          <td class="amount positive col-amount">R$ ${bnk.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
           <td><span class="badge ${row.match.pass === 7 ? 'badge-ai' : 'badge-success'}">${row.match.pass === 7 ? '🤖 IA Gemini' : '✅ Conciliado'}</span></td>
           <td class="text-center">
-            ${row.match.notes ? `<div style="font-size: 0.75rem; color: var(--text-muted); max-width: 250px; text-align: left; margin-bottom: 0.3rem;">${row.match.notes}</div>` : ''}
+            ${row.match.notes ? `<div style="font-size: 0.75rem; color: var(--text-muted); max-width: 250px; text-align: left; margin: 0 auto 0.3rem auto;">${row.match.notes}</div>` : ''}
             <button class="btn btn-outline btn-sm" onclick="Dashboard.unmatchItem('${row.match.id}')">Desfazer</button>
           </td>
         `;
       } else if (row.type === 'suggestion') {
-        const leg = row.suggestion.ledgerItem;
+        const bnk = row.suggestion.bankItem;
         const topCand = row.suggestion.candidates[0];
 
         tr.innerHTML = `
           <td><span class="badge badge-warning">${topCand.score}% Prob.</span></td>
           <td><span class="badge badge-pass">Passe 6 — Sugestão</span></td>
           <td>
-            <strong>${leg.date}</strong>
-            <div style="font-size: 0.75rem; color: var(--text-main);">${leg.description}</div>
+            <strong>${bnk.date}</strong>
+            <div style="font-size: 0.75rem; color: var(--text-main);">${bnk.description}</div>
           </td>
           <td>
-            <strong>${topCand.bankItem.date}</strong>
-            <div style="font-size: 0.75rem; color: var(--text-main);">${topCand.bankItem.description}</div>
+            <strong>${topCand.supplierItem.date}</strong>
+            <div style="font-size: 0.75rem; color: var(--text-main);">${topCand.supplierItem.description}</div>
           </td>
-          <td class="amount neutral">R$ ${leg.amount.toFixed(2)}</td>
+          <td class="amount neutral col-amount">R$ ${bnk.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
           <td><span class="badge badge-warning">⚠️ Sugestão</span></td>
           <td class="text-center">
             <button class="btn btn-primary btn-sm" onclick="Dashboard.acceptSuggestion('${row.suggestion.id}', 0)">Aceitar</button>
@@ -136,16 +136,16 @@ const Dashboard = (function () {
           </td>
         `;
       } else if (row.type === 'missing_bank') {
-        const leg = row.item;
+        const sup = row.item;
         tr.innerHTML = `
           <td><span class="badge badge-danger">0%</span></td>
           <td><span class="badge badge-outline">Ausente</span></td>
+          <td style="color: var(--text-dim); font-style: italic;">— Sem pagamento Banco —</td>
           <td>
-            <strong>${leg.date}</strong>
-            <div style="font-size: 0.75rem; color: var(--text-main);">${leg.description}</div>
+            <strong>${sup.date}</strong>
+            <div style="font-size: 0.75rem; color: var(--text-main);">${sup.description}</div>
           </td>
-          <td style="color: var(--text-dim); font-style: italic;">— Sem correspondência —</td>
-          <td class="amount negative">R$ ${leg.amount.toFixed(2)}</td>
+          <td class="amount negative col-amount">R$ ${sup.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
           <td><span class="badge badge-danger">❌ Ausente Banco</span></td>
           <td class="text-center">—</td>
         `;
@@ -154,13 +154,13 @@ const Dashboard = (function () {
         tr.innerHTML = `
           <td><span class="badge badge-danger">0%</span></td>
           <td><span class="badge badge-outline">Ausente</span></td>
-          <td style="color: var(--text-dim); font-style: italic;">— Sem correspondência —</td>
           <td>
             <strong>${bnk.date}</strong>
             <div style="font-size: 0.75rem; color: var(--text-main);">${bnk.description}</div>
           </td>
-          <td class="amount negative">R$ ${bnk.amount.toFixed(2)}</td>
-          <td><span class="badge badge-danger">❌ Ausente Razão</span></td>
+          <td style="color: var(--text-dim); font-style: italic;">— Sem baixa Fornecedor —</td>
+          <td class="amount negative col-amount">R$ ${bnk.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+          <td><span class="badge badge-danger">❌ Ausente Fornecedor</span></td>
           <td class="text-center">—</td>
         `;
       }
