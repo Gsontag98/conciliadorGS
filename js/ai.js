@@ -1,22 +1,24 @@
 /**
- * GEMINI AI INTEGRATION ENGINE
+ * GEMINI AI INTEGRATION ENGINE (WITH MODEL FALLBACK & RATE-LIMIT BACKOFF)
  * Hyper-accurate semantic reconciliation using Google Gemini REST API
  */
 
 const GeminiAI = (function () {
 
   const STORAGE_KEY = 'conciliador_gemini_api_key';
+  const MODEL_KEY = 'conciliador_gemini_model';
 
-  /**
-   * Get saved API Key
-   */
+  // Fallback models in priority order
+  const MODELS = [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash'
+  ];
+
   function getApiKey() {
     return localStorage.getItem(STORAGE_KEY) || '';
   }
 
-  /**
-   * Save API Key
-   */
   function saveApiKey(key) {
     if (key) {
       localStorage.setItem(STORAGE_KEY, key.trim());
@@ -25,18 +27,40 @@ const GeminiAI = (function () {
     }
   }
 
-  /**
-   * Check if Gemini API is configured
-   */
+  function getPreferredModel() {
+    return localStorage.getItem(MODEL_KEY) || MODELS[0];
+  }
+
+  function savePreferredModel(model) {
+    localStorage.setItem(MODEL_KEY, model);
+  }
+
   function isConfigured() {
     return Boolean(getApiKey());
   }
 
   /**
+   * Helper delay promise
+   */
+  function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Single API Call attempt for a specific model
+   */
+  async function callGeminiApi(modelName, apiKey, payload) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    return response;
+  }
+
+  /**
    * Perform AI semantic reconciliation on unmapped transactions
-   * @param {Array} unmappedBankItems - Remaining transactions in Razão Conta Banco
-   * @param {Array} unmappedSupplierItems - Remaining transactions in Razão Conta Fornecedores
-   * @returns {Promise<Array>} Matches produced by AI
    */
   async function reconcileWithAI(unmappedBankItems, unmappedSupplierItems) {
     const apiKey = getApiKey();
@@ -49,7 +73,6 @@ const GeminiAI = (function () {
       return [];
     }
 
-    // Limit payload to max 50 items per call to keep response fast & focused
     const bankBatch = unmappedBankItems.slice(0, 40).map(b => ({
       id: b.id,
       data: b.date,
@@ -93,7 +116,7 @@ Encontre os correspondentes exatos ou semânticos entre os dois lados.`;
         parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }]
       }],
       generationConfig: {
-        temperature: 0.1, // Low temperature for high precision & assertiveness
+        temperature: 0.1,
         topP: 0.95,
         responseMimeType: "application/json",
         responseSchema: {
@@ -119,33 +142,53 @@ Encontre os correspondentes exatos ou semânticos entre os dois lados.`;
       }
     };
 
-    // Call Gemini API (gemini-2.5-flash or fallback model)
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    // Try primary model first, then fallback models if 429 rate limit is hit
+    const modelChain = [getPreferredModel(), ...MODELS.filter(m => m !== getPreferredModel())];
+    let response = null;
+    let lastErrorStatus = null;
+
+    for (let m = 0; m < modelChain.length; m++) {
+      const currentModel = modelChain[m];
+      try {
+        console.log(`🤖 Chamando API Gemini (${currentModel})...`);
+        response = await callGeminiApi(currentModel, apiKey, payload);
+
+        if (response.ok) {
+          break; // Success!
+        }
+
+        lastErrorStatus = response.status;
+
+        if (response.status === 429) {
+          console.warn(`Cota atingida (429) no modelo ${currentModel}. Tentando modelo reserva em 3s...`);
+          await delay(3000); // 3 second backoff delay
+        } else {
+          console.error(`Erro ${response.status} no modelo ${currentModel}`);
+        }
+
+      } catch (e) {
+        console.error(`Falha na requisição para ${currentModel}:`, e);
+      }
+    }
+
+    if (!response || !response.ok) {
+      if (lastErrorStatus === 429) {
+        alert('⚠️ A cota gratuita da API do Gemini foi temporariamente atingida (Limite de requisições por minuto do Google).\n\nA conciliação continuará normalmente com os 6 passes algorítmicos. Aguarde alguns segundos para tentar utilizar a IA novamente.');
+      } else {
+        alert('⚠️ Não foi possível conectar à API do Gemini no momento. A conciliação continuará com os passes algorítmicos.');
+      }
+      return [];
+    }
 
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Erro na API do Gemini (${response.status}): ${errorText}`);
-      }
-
       const responseData = await response.json();
       const rawJsonText = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
 
-      if (!rawJsonText) {
-        console.warn('Gemini AI returned empty response.');
-        return [];
-      }
+      if (!rawJsonText) return [];
 
       const parsedResult = JSON.parse(rawJsonText);
       const aiMatches = parsedResult.matches || [];
 
-      // Map back to internal object schema
       const results = [];
       aiMatches.forEach(m => {
         const bnkItem = unmappedBankItems.find(b => b.id === m.bankId);
@@ -169,15 +212,17 @@ Encontre os correspondentes exatos ou semânticos entre os dois lados.`;
       return results;
 
     } catch (err) {
-      console.error('Falha na chamada da API Gemini:', err);
-      alert(`Aviso: Ocorreu um erro ao comunicar com a IA Gemini: ${err.message}`);
+      console.error('Erro ao processar JSON da IA:', err);
       return [];
     }
   }
 
   return {
+    MODELS,
     getApiKey,
     saveApiKey,
+    getPreferredModel,
+    savePreferredModel,
     isConfigured,
     reconcileWithAI
   };

@@ -90,6 +90,7 @@ const App = (function () {
   function openApiModal() {
     const key = GeminiAI.getApiKey();
     document.getElementById('input-api-key').value = key;
+    document.getElementById('select-api-model').value = GeminiAI.getPreferredModel();
     document.getElementById('modal-api-config').classList.add('active');
   }
 
@@ -99,14 +100,16 @@ const App = (function () {
 
   function saveApiKey() {
     const key = document.getElementById('input-api-key').value.trim();
+    const model = document.getElementById('select-api-model').value;
     if (!key) {
       alert('Por favor, digite uma chave de API válida.');
       return;
     }
     GeminiAI.saveApiKey(key);
+    GeminiAI.savePreferredModel(model);
     updateAIStatusIndicator();
     closeApiModal();
-    alert('✅ Chave de API do Gemini salva com sucesso! A conciliação por IA está ativada.');
+    alert(`✅ Chave de API do Gemini salva com sucesso! Modelo selecionado: ${model}`);
   }
 
   function removeApiKey() {
