@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { saveDeParaRule } from '../engine/deParaStorage.js';
 
 const useAppStore = create((set, get) => ({
   // Theme
@@ -78,6 +79,11 @@ const useAppStore = create((set, get) => ({
   manualMatch: (bankItem, supplierItem) => set(state => {
     if (!state.reconciliationResult) return state;
 
+    // Automatically learn De-Para rule
+    if (bankItem.description && supplierItem.description) {
+      saveDeParaRule(bankItem.description, supplierItem.description);
+    }
+
     const newMatch = {
       id: `manual_${Date.now()}`,
       pass: 99,
@@ -86,7 +92,7 @@ const useAppStore = create((set, get) => ({
       ledgerItems: [supplierItem],
       supplierItems: [supplierItem],
       confidence: 100,
-      notes: 'Conciliado manualmente pelo usuário',
+      notes: 'Conciliado manualmente pelo usuário (Regra aprendida)',
       isManual: true
     };
 

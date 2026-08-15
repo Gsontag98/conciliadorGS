@@ -139,6 +139,27 @@ export function extractDocNumbers(text) {
   return results;
 }
 
+export function extractCnpjRoot(text) {
+  const cnpj = extractCnpj(text);
+  if (cnpj && cnpj.length >= 8) {
+    return cnpj.substring(0, 8);
+  }
+  return null;
+}
+
+export function cleanCompanyName(name) {
+  if (!name) return '';
+  return String(name).toUpperCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\b(PGTO|PAGTO|PAG|PAGO|TED|DOC|PIX|BOLETO|DDA|SISPAG|TEV|COMPRAS|SERVICOS|VALOR|REF|DOCUMENTO|DOC|NF|NFE)\b/gi, ' ')
+    .replace(/\b(LTDA|ME|EPP|EIRELI|S\/A|S\.A\.|CIA|SA|MEI|INDUSTRIA|COMERCIO|DISTRIBUIDORA)\b/gi, ' ')
+    .replace(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/g, ' ')
+    .replace(/\b\d{14}\b/g, ' ')
+    .replace(/[^A-Z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function shareDocNumber(str1, str2) {
   const docs1 = extractDocNumbers(str1);
   const docs2 = extractDocNumbers(str2);

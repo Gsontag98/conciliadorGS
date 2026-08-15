@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { CheckCircle2, AlertCircle, Sparkles, ArrowRightLeft, Eye, Link, Unlink, Building2, Landmark, Check } from 'lucide-react';
+import { CheckCircle2, AlertCircle, Sparkles, ArrowRightLeft, Eye, Link, Unlink, Building2, Landmark, Check, Percent, HelpCircle } from 'lucide-react';
 import useAppStore from '../../store/useAppStore.js';
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
@@ -20,7 +20,7 @@ export default function TableView() {
 
   if (!reconciliationResult) return null;
 
-  const { matches = [], missingInBank = [], missingInSupplier = [] } = reconciliationResult;
+  const { matches = [], suggestions = [], missingInBank = [], missingInSupplier = [] } = reconciliationResult;
 
   // Filter matches based on search query and status filter
   const filteredMatches = useMemo(() => {
@@ -86,34 +86,99 @@ export default function TableView() {
     manualMatch(bankItem, supplierItem);
     setSelectedBankId(null);
     setSelectedSupplierId(null);
-    addToast('✅ Lançamentos vinculados com sucesso!', 'success');
+    addToast('✅ Lançamentos vinculados com sucesso! Padrão aprendido na memória De-Para.', 'success');
+  };
+
+  const handleApproveSuggestion = (sug) => {
+    manualMatch(sug.bankItem, sug.supplierItem);
+    addToast(`✅ Sugestão aprovada! Vínculo conciliado com ${sug.type === 'JUROS_MULTA' ? 'Juros/Encargos' : 'Desconto'}.`, 'success');
   };
 
   const getPassBadge = (match) => {
-    if (match.pass === 7) {
-      return <span className="badge badge-ai"><Sparkles size={12} /> IA Gemini ({match.confidence}%)</span>;
+    if (match.pass === 1) {
+      return <span className="badge badge-success"><CheckCircle2 size={12} /> Contrapartida Domínio (100%)</span>;
     }
-    if (match.pass === 1 || match.pass === 2) {
-      return <span className="badge badge-success"><CheckCircle2 size={12} /> {match.passName}</span>;
+    if (match.pass === 2) {
+      return <span className="badge badge-success"><CheckCircle2 size={12} /> CNPJ Exato (100%)</span>;
+    }
+    if (match.pass === 3) {
+      return <span className="badge badge-success"><Building2 size={12} /> Matriz / Filial (100%)</span>;
+    }
+    if (match.pass === 4) {
+      return <span className="badge badge-info"><CheckCircle2 size={12} /> Regra De-Para (100%)</span>;
+    }
+    if (match.pass === 5) {
+      return <span className="badge badge-success"><CheckCircle2 size={12} /> NF/Doc Exato (100%)</span>;
     }
     if (match.pass === 99) {
-      return <span className="badge badge-info"><Link size={12} /> Manual (100%)</span>;
+      return <span className="badge badge-primary"><Link size={12} /> Manual / Aprendido</span>;
     }
-    return <span className="badge badge-warning"><AlertCircle size={12} /> {match.passName}</span>;
+    return <span className="badge badge-info">{match.passName}</span>;
   };
 
   return (
-    <div className="table-view-container" style={{ display: 'flex', flexDirection: 'column', gap: 20, paddingBottom: 40 }}>
-      {/* Conciliated Matches Section */}
+    <div className="table-view-container" style={{ display: 'flex', flexDirection: 'column', gap: 24, paddingBottom: 40 }}>
+      
+      {/* 1. Intelligent Suggestions Section (Juros / Descontos em Boletos) */}
+      {suggestions.length > 0 && (
+        <div style={{ background: 'rgba(245, 158, 11, 0.05)', padding: '16px 18px', borderRadius: 14, border: '1px solid rgba(245, 158, 11, 0.25)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#f59e0b', display: 'flex', alignItems: 'center', gap: 8, margin: 0 }}>
+              <Percent size={18} />
+              Sugestões Inteligentes de Boletos com Juros ou Descontos ({suggestions.length})
+            </h3>
+            <span style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+              Mesmo CNPJ/Fornecedor com pequena variação de centavos
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {suggestions.map(sug => (
+              <div
+                key={sug.id}
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  background: 'var(--bg-card)',
+                  padding: '10px 14px',
+                  borderRadius: 10,
+                  border: '1px solid var(--border-secondary)',
+                  gap: 12
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
+                  <span className={`badge ${sug.type === 'JUROS_MULTA' ? 'badge-warning' : 'badge-info'}`}>
+                    {sug.type === 'JUROS_MULTA' ? `+ Juros R$ ${sug.diff.toFixed(2)}` : `- Desconto R$ ${sug.diff.toFixed(2)}`}
+                  </span>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-primary)' }}>
+                    <strong>{sug.bankItem.description}</strong> (Banco: {formatCurrency(sug.bankItem.amount)}) <ArrowRightLeft size={12} style={{ display: 'inline', margin: '0 4px', verticalAlign: 'middle' }} /> <strong>{sug.supplierItem.description}</strong> (Fornecedor: {formatCurrency(sug.supplierItem.amount)})
+                  </div>
+                </div>
+
+                <button
+                  className="btn btn-primary"
+                  style={{ padding: '4px 12px', fontSize: '0.74rem', whiteSpace: 'nowrap' }}
+                  onClick={() => handleApproveSuggestion(sug)}
+                >
+                  <Check size={13} /> Aprovar Vínculo
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 2. Conciliated Matches Section */}
       {filteredMatches.length > 0 && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
               <CheckCircle2 size={18} style={{ color: 'var(--success)' }} />
-              Lançamentos Conciliados ({filteredMatches.length})
+              Lançamentos Conciliados com Certeza ({filteredMatches.length})
             </h3>
             <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>
-              Comparativo direto entre saídas bancárias e baixas de fornecedores
+              Cruzamentos rigorosos com 100% de assertividade matemática
             </span>
           </div>
 
@@ -194,9 +259,9 @@ export default function TableView() {
         </div>
       )}
 
-      {/* Unmatched / Pending Items Section */}
+      {/* 3. Unmatched / Pending Items Section */}
       {(filteredMissingBank.length > 0 || filteredMissingSupplier.length > 0) && (
-        <div style={{ marginTop: 10 }}>
+        <div style={{ marginTop: 6 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
               <AlertCircle size={18} style={{ color: 'var(--warning)' }} />
@@ -205,7 +270,7 @@ export default function TableView() {
 
             {selectedBankId && selectedSupplierId && (
               <button className="btn btn-primary" onClick={handleManualPairing} style={{ padding: '6px 14px', fontSize: '0.78rem' }}>
-                <Link size={14} /> Vincular Itens Selecionados
+                <Link size={14} /> Vincular Itens Selecionados (Aprender Regra)
               </button>
             )}
           </div>
@@ -282,7 +347,7 @@ export default function TableView() {
         </div>
       )}
 
-      {filteredMatches.length === 0 && filteredMissingBank.length === 0 && filteredMissingSupplier.length === 0 && (
+      {filteredMatches.length === 0 && suggestions.length === 0 && filteredMissingBank.length === 0 && filteredMissingSupplier.length === 0 && (
         <div className="empty-state" style={{ padding: '40px 0' }}>
           <h3>Nenhum resultado para os filtros atuais</h3>
           <p>Tente limpar a busca ou selecionar outro filtro de status.</p>

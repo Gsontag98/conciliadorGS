@@ -233,6 +233,7 @@ export function normalizeData(rows, mapping, sourceName) {
     const docNumbers = extractDocNumbers(description);
     const explicitDoc = docNumbers.length > 0 ? docNumbers[0] : document;
     const cnpj = extractCnpj(description);
+    const contrapartida = row['Cta.C.Part.'] ? String(row['Cta.C.Part.']).trim() : (row['Contrapartida'] ? String(row['Contrapartida']).trim() : null);
 
     normalized.push({
       id: `${sourceName}_${idx + 1}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
@@ -243,6 +244,7 @@ export function normalizeData(rows, mapping, sourceName) {
       document: explicitDoc,
       lote: document,
       cnpj: cnpj,
+      contrapartida: contrapartida,
       originalRow: row,
       source: sourceName
     });

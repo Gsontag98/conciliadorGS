@@ -1,4 +1,5 @@
-import { calculateSimilarity, shareDocNumber, extractDocNumbers, extractCnpj } from './similarity.js';
+import { calculateSimilarity, shareDocNumber, extractDocNumbers, extractCnpj, extractCnpjRoot, cleanCompanyName } from './similarity.js';
+import { matchDePara, saveDeParaRule } from './deParaStorage.js';
 
 function getDaysDiff(d1Str, d2Str) {
   if (!d1Str || !d2Str) return 999;
@@ -27,14 +28,16 @@ function findSubsetSum(numbers, targetCents, maxItems) {
 }
 
 /**
- * 100% Rigorous Accounting Reconciliation Engine
- * Guarantees that amounts must be EXACT to the penny (R$ 0,00 diff)
- * Prioritizes CNPJ, Document/NF, and Supplier Entity validation.
+ * Advanced Specialist Reconciliation Engine:
+ * Combines Contrapartida accounts, full CNPJ, CNPJ root (Matriz/Filial),
+ * learned De-Para rules, exact NF/docs, and intelligent Interest/Discount detector.
  */
 export async function reconcile(bankLedgerItems, supplierLedgerItems, options = {}, onProgress = null) {
   const config = {
     enableNtoOne: true,
     maxNtoOneItems: 6,
+    maxInterestDiscountDiff: 35.0, // R$ 35,00
+    maxInterestDiscountPct: 0.02, // 2%
     ...options
   };
 
@@ -42,6 +45,7 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
   const supplierItems = supplierLedgerItems.map(item => ({ ...item, matched: false, matchId: null }));
 
   const matches = [];
+  const suggestions = [];
 
   function addMatch(bankItemOrItems, supplierItemOrItems, passInfo) {
     const bItems = Array.isArray(bankItemOrItems) ? bankItemOrItems : [bankItemOrItems];
@@ -73,9 +77,42 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
   }
 
   // =========================================================================
-  // PASSE 1: Match 100% Exato por CNPJ + Valor Rigorosamente Idêntico
+  // PASSE 1: Match por Código de Conta Contrapartida (Cta.C.Part. + Valor Exato)
   // =========================================================================
   let pass1Matches = 0;
+  for (const b of bankItems) {
+    if (b.matched || !b.contrapartida) continue;
+
+    for (const s of supplierItems) {
+      if (s.matched) continue;
+
+      const amountDiff = Math.abs(Math.round(b.amount * 100) - Math.round(s.amount * 100));
+      if (amountDiff === 0) {
+        // Check if bank's contrapartida matches supplier account or vice versa
+        const isContrapartidaMatch = (s.contrapartida && b.contrapartida && (b.contrapartida === s.lote || s.contrapartida === b.lote));
+
+        if (isContrapartidaMatch) {
+          const days = getDaysDiff(b.date, s.date);
+          addMatch(b, s, {
+            pass: 1,
+            passName: 'Match 100% Exato (Contrapartida Domínio)',
+            confidence: 100,
+            badgeClass: 'badge-exact',
+            notes: `Conta contrapartida ${b.contrapartida} coincidente e valor exato R$ ${b.amount.toFixed(2)}${days > 0 ? ` (±${days}d)` : ''}`,
+            type: '1:1'
+          });
+          pass1Matches++;
+          break;
+        }
+      }
+    }
+  }
+  reportProgress(1, 'Match Contrapartida', pass1Matches);
+
+  // =========================================================================
+  // PASSE 2: Match 100% Exato por CNPJ Completo + Valor Rigorosamente Idêntico
+  // =========================================================================
+  let pass2Matches = 0;
   for (const b of bankItems) {
     if (b.matched) continue;
     for (const s of supplierItems) {
@@ -88,25 +125,89 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
         if (hasCnpjMatch) {
           const days = getDaysDiff(b.date, s.date);
           addMatch(b, s, {
-            pass: 1,
+            pass: 2,
             passName: 'Match 100% Exato (CNPJ + Valor)',
             confidence: 100,
             badgeClass: 'badge-exact',
-            notes: `CNPJ ${b.cnpj} idêntico e valor exato R$ ${b.amount.toFixed(2)}${days > 0 ? ` (Diferença de ${days}d)` : ' (Mesmo dia)'}`,
+            notes: `CNPJ ${b.cnpj} idêntico e valor exato R$ ${b.amount.toFixed(2)}${days > 0 ? ` (±${days}d)` : ' (Mesmo dia)'}`,
             type: '1:1'
           });
-          pass1Matches++;
+          pass2Matches++;
           break;
         }
       }
     }
   }
-  reportProgress(1, 'Match por CNPJ', pass1Matches);
+  reportProgress(2, 'Match por CNPJ', pass2Matches);
 
   // =========================================================================
-  // PASSE 2: Match 100% Exato por Número de Documento / NF + Valor Idêntico
+  // PASSE 3: Match por Raiz de CNPJ (Matriz / Filial - Primeiros 8 dígitos)
   // =========================================================================
-  let pass2Matches = 0;
+  let pass3Matches = 0;
+  for (const b of bankItems) {
+    if (b.matched) continue;
+    const bRoot = extractCnpjRoot(b.cnpj || b.description);
+    if (!bRoot) continue;
+
+    for (const s of supplierItems) {
+      if (s.matched) continue;
+
+      const sRoot = extractCnpjRoot(s.cnpj || s.description);
+      if (!sRoot || bRoot !== sRoot) continue;
+
+      const amountDiff = Math.abs(Math.round(b.amount * 100) - Math.round(s.amount * 100));
+      if (amountDiff === 0) {
+        const days = getDaysDiff(b.date, s.date);
+        addMatch(b, s, {
+          pass: 3,
+          passName: 'Match Raiz de CNPJ (Matriz / Filial)',
+          confidence: 100,
+          badgeClass: 'badge-exact',
+          notes: `Mesmo grupo empresarial (Raiz CNPJ ${bRoot}) e valor exato R$ ${b.amount.toFixed(2)}${days > 0 ? ` (±${days}d)` : ''}`,
+          type: '1:1'
+        });
+        pass3Matches++;
+        break;
+      }
+    }
+  }
+  reportProgress(3, 'Match Matriz/Filial', pass3Matches);
+
+  // =========================================================================
+  // PASSE 4: Match por Regra Aprendida "De-Para" + Valor Rigoroso
+  // =========================================================================
+  let pass4Matches = 0;
+  for (const b of bankItems) {
+    if (b.matched) continue;
+
+    for (const s of supplierItems) {
+      if (s.matched) continue;
+
+      const amountDiff = Math.abs(Math.round(b.amount * 100) - Math.round(s.amount * 100));
+      if (amountDiff === 0) {
+        const deParaMatch = matchDePara(b.description, s.description);
+        if (deParaMatch) {
+          const days = getDaysDiff(b.date, s.date);
+          addMatch(b, s, {
+            pass: 4,
+            passName: 'Match por Regra De-Para Aprendida',
+            confidence: 100,
+            badgeClass: 'badge-exact',
+            notes: `Regra aprendida: "${deParaMatch.bankPattern}" -> "${deParaMatch.supplierPattern}" (R$ ${b.amount.toFixed(2)})`,
+            type: '1:1'
+          });
+          pass4Matches++;
+          break;
+        }
+      }
+    }
+  }
+  reportProgress(4, 'Regras De-Para', pass4Matches);
+
+  // =========================================================================
+  // PASSE 5: Match 100% Exato por Número de Documento / NF + Valor Idêntico
+  // =========================================================================
+  let pass5Matches = 0;
   for (const b of bankItems) {
     if (b.matched) continue;
     for (const s of supplierItems) {
@@ -119,64 +220,30 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
         if (hasDocMatch) {
           const days = getDaysDiff(b.date, s.date);
           addMatch(b, s, {
-            pass: 2,
+            pass: 5,
             passName: 'Match 100% Exato (NF/Doc + Valor)',
             confidence: 100,
             badgeClass: 'badge-exact',
-            notes: `Documento/NF coincidente e valor exato R$ ${b.amount.toFixed(2)}${days > 0 ? ` (Diferença de ${days}d)` : ' (Mesmo dia)'}`,
+            notes: `Documento/NF coincidente e valor exato R$ ${b.amount.toFixed(2)}${days > 0 ? ` (±${days}d)` : ' (Mesmo dia)'}`,
             type: '1:1'
           });
-          pass2Matches++;
+          pass5Matches++;
           break;
         }
       }
     }
   }
-  reportProgress(2, 'Match por NF/Doc', pass2Matches);
+  reportProgress(5, 'Match por NF/Doc', pass5Matches);
 
   // =========================================================================
-  // PASSE 3: Match Exato por Fornecedor (Texto) + Valor Idêntico + Mesma Data
+  // PASSE 6: Match por Razão Social Limpa (cleanCompanyName) + Valor Exato + Data
   // =========================================================================
-  let pass3Matches = 0;
+  let pass6Matches = 0;
   for (const b of bankItems) {
     if (b.matched) continue;
 
-    let bestCandidate = null;
-    let maxSim = 0;
-
-    for (const s of supplierItems) {
-      if (s.matched) continue;
-
-      const amountDiff = Math.abs(Math.round(b.amount * 100) - Math.round(s.amount * 100));
-      if (amountDiff === 0 && b.date === s.date) {
-        const textSim = calculateSimilarity(b.description, s.description);
-        if (textSim >= 0.50 && textSim > maxSim) {
-          maxSim = textSim;
-          bestCandidate = s;
-        }
-      }
-    }
-
-    if (bestCandidate) {
-      addMatch(b, bestCandidate, {
-        pass: 3,
-        passName: 'Match Exato (Valor + Data + Nome)',
-        confidence: 100,
-        badgeClass: 'badge-exact',
-        notes: `Valor exato R$ ${b.amount.toFixed(2)} e mesma data (${b.date}) com fornecedor correspondente`,
-        type: '1:1'
-      });
-      pass3Matches++;
-    }
-  }
-  reportProgress(3, 'Match Valor + Data', pass3Matches);
-
-  // =========================================================================
-  // PASSE 4: Match por Similaridade Alta de Fornecedor (>= 75%) + Valor Rigoroso (±15 dias)
-  // =========================================================================
-  let pass4Matches = 0;
-  for (const b of bankItems) {
-    if (b.matched) continue;
+    const bClean = cleanCompanyName(b.description);
+    if (!bClean || bClean.length < 3) continue;
 
     let bestCandidate = null;
     let maxSim = 0;
@@ -187,11 +254,16 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
 
       const amountDiff = Math.abs(Math.round(b.amount * 100) - Math.round(s.amount * 100));
       if (amountDiff === 0) {
+        const sClean = cleanCompanyName(s.description);
+        if (!sClean || sClean.length < 3) continue;
+
         const days = getDaysDiff(b.date, s.date);
         if (days <= 15) {
-          const textSim = calculateSimilarity(b.description, s.description);
-          if (textSim >= 0.70 && textSim > maxSim) {
-            maxSim = textSim;
+          const isSubstring = bClean.includes(sClean) || sClean.includes(bClean);
+          const sim = calculateSimilarity(bClean, sClean);
+
+          if ((isSubstring || sim >= 0.70) && sim > maxSim) {
+            maxSim = sim;
             bestCandidate = s;
             bestDays = days;
           }
@@ -201,22 +273,22 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
 
     if (bestCandidate) {
       addMatch(b, bestCandidate, {
-        pass: 4,
+        pass: 6,
         passName: 'Match Nome Fornecedor (Valor Exato)',
         confidence: 95,
         badgeClass: 'badge-text',
-        notes: `Valor idêntico R$ ${b.amount.toFixed(2)} e nome correspondente (${Math.round(maxSim * 100)}% similaridade, ±${bestDays}d)`,
+        notes: `Fornecedor coincidente e valor exato R$ ${b.amount.toFixed(2)}${bestDays > 0 ? ` (±${bestDays}d)` : ' (Mesmo dia)'}`,
         type: '1:1'
       });
-      pass4Matches++;
+      pass6Matches++;
     }
   }
-  reportProgress(4, 'Similaridade de Fornecedor', pass4Matches);
+  reportProgress(6, 'Razão Social Limpa', pass6Matches);
 
   // =========================================================================
-  // PASSE 5: Soma Combinatória N:1 (Soma Exata das NFs = Valor Exato do Pagamento)
+  // PASSE 7: Soma Combinatória N:1 (Soma Exata das NFs = Valor Exato do Pagamento)
   // =========================================================================
-  let pass5Matches = 0;
+  let pass7Matches = 0;
   if (config.enableNtoOne) {
     for (const b of bankItems) {
       if (b.matched) continue;
@@ -231,19 +303,54 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
         if (combo && combo.length >= 2) {
           const matchedSuppliers = combo.map(c => c.item);
           addMatch(b, matchedSuppliers, {
-            pass: 5,
+            pass: 7,
             passName: `Soma Exata N:1 (${matchedSuppliers.length} títulos)`,
             confidence: 90,
             badgeClass: 'badge-subset',
-            notes: `Soma exata de ${matchedSuppliers.length} notas no fornecedor bate 100% com o pagamento de R$ ${b.amount.toFixed(2)} no banco`,
+            notes: `Soma exata de ${matchedSuppliers.length} notas no fornecedor fecha 100% com o pagamento de R$ ${b.amount.toFixed(2)}`,
             type: 'N:1'
           });
-          pass5Matches++;
+          pass7Matches++;
         }
       }
     }
   }
-  reportProgress(5, 'Soma Combinatória Exata', pass5Matches);
+  reportProgress(7, 'Soma Combinatória', pass7Matches);
+
+  // =========================================================================
+  // DETECTOR DE SUGESTÕES DE JUROS E DESCONTOS EM BOLETOS
+  // (Identifica mesmo CNPJ ou mesmo fornecedor com pequena variação de centavos)
+  // =========================================================================
+  const unmappedBank = bankItems.filter(b => !b.matched);
+  const unmappedSupplier = supplierItems.filter(s => !s.matched);
+
+  for (const b of unmappedBank) {
+    for (const s of unmappedSupplier) {
+      const hasCnpj = (b.cnpj && s.cnpj && b.cnpj === s.cnpj) || (extractCnpjRoot(b.cnpj || b.description) && extractCnpjRoot(b.cnpj || b.description) === extractCnpjRoot(s.cnpj || s.description));
+      const textSim = calculateSimilarity(cleanCompanyName(b.description), cleanCompanyName(s.description));
+      const hasDoc = shareDocNumber(b.document || b.description, s.document || s.description);
+
+      if (hasCnpj || hasDoc || textSim >= 0.75) {
+        const diff = b.amount - s.amount;
+        const absDiff = Math.abs(diff);
+        const pctDiff = absDiff / s.amount;
+
+        if (absDiff > 0 && (absDiff <= config.maxInterestDiscountDiff || pctDiff <= config.maxInterestDiscountPct) && getDaysDiff(b.date, s.date) <= 15) {
+          const isJuros = diff > 0;
+          suggestions.push({
+            id: `sug_${b.id}_${s.id}`,
+            bankItem: b,
+            supplierItem: s,
+            diff: absDiff,
+            type: isJuros ? 'JUROS_MULTA' : 'DESCONTO_OBTIDO',
+            notes: isJuros
+              ? `Possível Juros/Encargos de R$ ${absDiff.toFixed(2)} (Banco: R$ ${b.amount.toFixed(2)} vs Fornecedor: R$ ${s.amount.toFixed(2)})`
+              : `Possível Desconto Obtido de R$ ${absDiff.toFixed(2)} (Banco: R$ ${b.amount.toFixed(2)} vs Fornecedor: R$ ${s.amount.toFixed(2)})`
+          });
+        }
+      }
+    }
+  }
 
   // Remaining unmatched items
   const missingInBank = bankItems.filter(b => !b.matched);
@@ -259,9 +366,9 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
     matches,
     missingInBank,
     missingInSupplier,
+    suggestions,
     totalBankCount,
     totalSupplierCount,
-    reconciledRate,
-    suggestions: []
+    reconciledRate
   };
 }
