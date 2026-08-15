@@ -469,31 +469,32 @@ export async function parseFile(file) {
 
   // Strategy 1: Binary parsing for XLSX / XLS
   if (isBinary) {
-    const readOptions = { codepage: 1252, cellStyles: false, raw: true };
+    const readOptions = { codepage: 1252, cellStyles: false, sheetStubs: true };
 
     try {
       diag.log(`[SHEETJS] Tentando leitura binária com XLSX.read(bytes, { type: 'array', codepage: 1252 })...`);
       const workbook = XLSX.read(bytes, { type: 'array', ...readOptions });
       
-      const allNames = Array.from(new Set([
-        ...(workbook.SheetNames || []),
-        ...Object.keys(workbook.Sheets || {})
-      ]));
+      const sheetNamesList = workbook.SheetNames || [];
+      const sheetKeysList = Object.keys(workbook.Sheets || {});
+      const allNames = Array.from(new Set([...sheetNamesList, ...sheetKeysList]));
 
-      diag.log(`[SHEETJS OK] Nomes de abas encontrados: [${allNames.join(', ')}]`);
+      diag.log(`[SHEETJS OK] SheetNames: [${sheetNamesList.join(', ')}], Sheets keys: [${sheetKeysList.join(', ')}]`);
 
-      for (const name of allNames) {
+      for (let i = 0; i < allNames.length; i++) {
+        const name = allNames[i];
         let sheet = workbook.Sheets?.[name];
-        if (!sheet && workbook.Sheets) {
-          sheet = workbook.Sheets[Object.keys(workbook.Sheets)[0]];
-        }
+        if (!sheet && sheetNamesList[i]) sheet = workbook.Sheets?.[sheetNamesList[i]];
+        if (!sheet && sheetKeysList[i]) sheet = workbook.Sheets?.[sheetKeysList[i]];
+        if (!sheet && sheetKeysList.length > 0) sheet = workbook.Sheets?.[sheetKeysList[0]];
+
         if (sheet) {
-          diag.log(`[SHEETJS] Processando aba "${name}"...`);
+          diag.log(`[SHEETJS] Processando aba "${name || 'Planilha'}"...`);
           const rawData = getSheetDataMatrix(sheet, diag);
           if (Array.isArray(rawData) && rawData.length > 0) {
             const processed = processRawMatrix(rawData, diag);
             if (processed.rawMatrix.length > 0) {
-              sheets[name] = processed;
+              sheets[name || `Aba_${i + 1}`] = processed;
             }
           }
         }
@@ -508,24 +509,25 @@ export async function parseFile(file) {
         const binStr = await readFileAsBinaryString(file);
         const workbook = XLSX.read(binStr, { type: 'binary', ...readOptions });
         
-        const allNames = Array.from(new Set([
-          ...(workbook.SheetNames || []),
-          ...Object.keys(workbook.Sheets || {})
-        ]));
+        const sheetNamesList = workbook.SheetNames || [];
+        const sheetKeysList = Object.keys(workbook.Sheets || {});
+        const allNames = Array.from(new Set([...sheetNamesList, ...sheetKeysList]));
 
-        diag.log(`[SHEETJS BINARY OK] Nomes de abas: [${allNames.join(', ')}]`);
+        diag.log(`[SHEETJS BINARY OK] SheetNames: [${sheetNamesList.join(', ')}], Sheets keys: [${sheetKeysList.join(', ')}]`);
 
-        for (const name of allNames) {
+        for (let i = 0; i < allNames.length; i++) {
+          const name = allNames[i];
           let sheet = workbook.Sheets?.[name];
-          if (!sheet && workbook.Sheets) {
-            sheet = workbook.Sheets[Object.keys(workbook.Sheets)[0]];
-          }
+          if (!sheet && sheetNamesList[i]) sheet = workbook.Sheets?.[sheetNamesList[i]];
+          if (!sheet && sheetKeysList[i]) sheet = workbook.Sheets?.[sheetKeysList[i]];
+          if (!sheet && sheetKeysList.length > 0) sheet = workbook.Sheets?.[sheetKeysList[0]];
+
           if (sheet) {
             const rawData = getSheetDataMatrix(sheet, diag);
             if (Array.isArray(rawData) && rawData.length > 0) {
               const processed = processRawMatrix(rawData, diag);
               if (processed.rawMatrix.length > 0) {
-                sheets[name] = processed;
+                sheets[name || `Aba_${i + 1}`] = processed;
               }
             }
           }
