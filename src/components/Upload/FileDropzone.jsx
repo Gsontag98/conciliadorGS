@@ -1,9 +1,9 @@
 import { useState, useRef } from 'react';
-import { Upload, CheckCircle, AlertCircle, Sliders, FileSpreadsheet } from 'lucide-react';
-import { parseFile } from '../../engine/parser';
-import { autoDetect, normalizeData } from '../../engine/mapper';
-import ColumnMappingModal from './ColumnMappingModal';
-import useAppStore from '../../store/useAppStore';
+import { Upload, CheckCircle, AlertCircle, Sliders } from 'lucide-react';
+import { parseFile } from '../../engine/parser.js';
+import { autoDetect, normalizeData } from '../../engine/mapper.js';
+import ColumnMappingModal from './ColumnMappingModal.jsx';
+import useAppStore from '../../store/useAppStore.js';
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
@@ -30,20 +30,20 @@ export default function FileDropzone({ type }) {
     try {
       const parsed = await parseFile(file);
 
-      // Look across all sheets to find one with rows or rawMatrix
+      // Check if any sheet has rawMatrix or rows
       let sheetData = null;
       let usedSheetName = '';
 
       for (const name of parsed.sheetNames) {
         const s = parsed.sheets[name];
-        if (s && ((s.rows && s.rows.length > 0) || (s.rawMatrix && s.rawMatrix.length > 0))) {
+        if (s && s.rawMatrix && s.rawMatrix.length > 0) {
           sheetData = s;
           usedSheetName = name;
           break;
         }
       }
 
-      if (!sheetData) {
+      if (!sheetData || !sheetData.rawMatrix || sheetData.rawMatrix.length === 0) {
         throw new Error('Nenhum dado encontrado no arquivo. O arquivo parece estar vazio.');
       }
 
@@ -77,8 +77,7 @@ export default function FileDropzone({ type }) {
         });
         addToast(`✅ ${file.name}: ${items.length} lançamentos carregados`, 'success');
       } else {
-        // Did not automatically find items, but we saved rawSheetData so user can map columns!
-        setError(`Lançamentos não detectados automaticamente. Clique em "Ajustar Colunas" para selecionar manualmente.`);
+        setError(`Lançamentos não detectados automaticamente. Clique em "Mapear Colunas Manualmente" para selecionar.`);
         setIsModalOpen(true);
       }
     } catch (err) {
@@ -124,7 +123,7 @@ export default function FileDropzone({ type }) {
           type="file"
           ref={fileInputRef}
           onChange={onFileChange}
-          accept=".xlsx,.xls,.csv"
+          accept=".xlsx,.xls,.xlsb,.csv"
         />
 
         {hasLoadedItems ? (

@@ -2,63 +2,72 @@ import * as XLSX from 'xlsx';
 
 /**
  * Universal accounting report parser supporting:
- * - Native XLSX (ZIP PK\x03\x04)
- * - Native XLS BIFF8 (\xD0\xCF\x11\xE0)
- * - Domínio HTML table reports (.xls/.xlsx) in Windows-1252 / UTF-8
+ * - Native XLSX / XLS / XLSB
+ * - Domínio HTML table reports (.xls/.xlsx) in Windows-1252 / Latin1 / UTF-8
  * - XML Spreadsheet 2003 (.xml/.xls)
  * - CSV / TSV with semicolon/tab delimiter
  */
 
 function parseHtmlTable(htmlText) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(htmlText, 'text/html');
-  const rows = [];
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(htmlText, 'text/html');
+    const rows = [];
 
-  const trElements = doc.querySelectorAll('tr');
-  trElements.forEach(tr => {
-    const row = [];
-    const cells = tr.querySelectorAll('td, th');
-    cells.forEach(cell => {
-      const text = (cell.textContent || '').replace(/\u00a0/g, ' ').trim();
-      const colspan = parseInt(cell.getAttribute('colspan') || '1', 10);
-      row.push(text);
-      for (let c = 1; c < colspan; c++) {
-        row.push(null);
+    const trElements = doc.querySelectorAll('tr');
+    trElements.forEach(tr => {
+      const row = [];
+      const cells = tr.querySelectorAll('td, th');
+      cells.forEach(cell => {
+        const text = (cell.textContent || '').replace(/\u00a0/g, ' ').trim();
+        const colspan = parseInt(cell.getAttribute('colspan') || '1', 10);
+        row.push(text);
+        for (let c = 1; c < colspan; c++) {
+          row.push(null);
+        }
+      });
+      if (row.some(c => c !== null && c !== '')) {
+        rows.push(row);
       }
     });
-    if (row.some(c => c !== null && c !== '')) {
-      rows.push(row);
-    }
-  });
 
-  return rows;
+    return rows;
+  } catch (e) {
+    console.warn('HTML table parsing failed:', e);
+    return [];
+  }
 }
 
 function parseXmlSpreadsheet(xmlText) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(xmlText, 'text/xml');
-  const rows = [];
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlText, 'text/xml');
+    const rows = [];
 
-  const rowElements = doc.querySelectorAll('Row');
-  rowElements.forEach(rowEl => {
-    const row = [];
-    const cellElements = rowEl.querySelectorAll('Cell');
-    cellElements.forEach(cellEl => {
-      const indexAttr = cellEl.getAttribute('ss:Index');
-      if (indexAttr) {
-        const targetIdx = parseInt(indexAttr, 10) - 1;
-        while (row.length < targetIdx) row.push(null);
+    const rowElements = doc.querySelectorAll('Row');
+    rowElements.forEach(rowEl => {
+      const row = [];
+      const cellElements = rowEl.querySelectorAll('Cell');
+      cellElements.forEach(cellEl => {
+        const indexAttr = cellEl.getAttribute('ss:Index');
+        if (indexAttr) {
+          const targetIdx = parseInt(indexAttr, 10) - 1;
+          while (row.length < targetIdx) row.push(null);
+        }
+        const dataEl = cellEl.querySelector('Data');
+        const text = dataEl ? (dataEl.textContent || '').trim() : '';
+        row.push(text);
+      });
+      if (row.some(c => c !== null && c !== '')) {
+        rows.push(row);
       }
-      const dataEl = cellEl.querySelector('Data');
-      const text = dataEl ? (dataEl.textContent || '').trim() : '';
-      row.push(text);
     });
-    if (row.some(c => c !== null && c !== '')) {
-      rows.push(row);
-    }
-  });
 
-  return rows;
+    return rows;
+  } catch (e) {
+    console.warn('XML spreadsheet parsing failed:', e);
+    return [];
+  }
 }
 
 function parseDelimitedText(text) {
@@ -104,7 +113,7 @@ function readAsTextWithEncoding(file, encoding = 'windows-1252') {
   });
 }
 
-function processRawMatrix(data) {
+export function processRawMatrix(data) {
   if (!data || !Array.isArray(data) || data.length === 0) {
     return { headers: [], rows: [], rawMatrix: [] };
   }
@@ -117,7 +126,7 @@ function processRawMatrix(data) {
     if (row.length > maxCols) maxCols = row.length;
   }
 
-  const headerKeywords = ['DATA', 'DT', 'VALOR', 'VLR', 'HISTORICO', 'HIST', 'DEBITO', 'DEB', 'CREDITO', 'CRED', 'LANCAMENTO', 'LCTO', 'DOCUMENTO', 'DOC', 'SALDO', 'MOVIMENTO', 'COMPLEMENTO', 'FORNECEDOR', 'NOME', 'DESCRICAO'];
+  const headerKeywords = ['DATA', 'DT', 'VALOR', 'VLR', 'HISTORICO', 'HIST', 'DEBITO', 'DEB', 'CREDITO', 'CRED', 'LANCAMENTO', 'LCTO', 'DOCUMENTO', 'DOC', 'SALDO', 'MOVIMENTO', 'COMPLEMENTO', 'FORNECEDOR', 'NOME', 'DESCRICAO', 'LOTE'];
   const excludeKeywords = ['TOTAL GERAL', 'TOTAL DO DIA', 'TOTAL DA CONTA', 'SUBTOTAL', 'SALDO ANTERIOR', 'SALDO ATUAL', 'SALDO FINAL', 'DEMONSTRATIVO', 'LIVRO RAZAO', 'EMPRESA:', 'PERIODO:'];
 
   let headerRowIdx = -1;
@@ -227,80 +236,79 @@ function processRawMatrix(data) {
 }
 
 export async function parseFile(file) {
-  const arrayBuffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(arrayBuffer);
-
-  const isZip = bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4B && bytes[2] === 0x03 && bytes[3] === 0x04;
-  const isCfb = bytes.length >= 4 && bytes[0] === 0xD0 && bytes[1] === 0xCF && bytes[2] === 0x11 && bytes[3] === 0xE0;
-
   const sheets = {};
   let sheetNames = [];
 
-  // Try binary parsing if valid XLSX or XLS
-  if (isZip || isCfb) {
-    try {
-      const workbook = XLSX.read(bytes, {
-        type: 'array',
-        cellDates: true,
-        raw: false,
-        dateNF: 'yyyy-mm-dd'
-      });
-      sheetNames = workbook.SheetNames || [];
+  // Strategy 1: Read as ArrayBuffer with SheetJS (handles .xlsx, .xls, .xlsb)
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    const workbook = XLSX.read(bytes, { type: 'array' });
+
+    if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
+      sheetNames = workbook.SheetNames;
       for (const name of sheetNames) {
         const sheet = workbook.Sheets[name];
-        const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
-        const processed = processRawMatrix(rawData);
-        if (processed.rawMatrix.length > 0) {
-          sheets[name] = processed;
+        if (sheet) {
+          const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
+          if (Array.isArray(rawData) && rawData.length > 0) {
+            const processed = processRawMatrix(rawData);
+            if (processed.rawMatrix.length > 0) {
+              sheets[name] = processed;
+            }
+          }
         }
       }
-    } catch (e) {
-      console.warn('SheetJS binary parse error:', e);
     }
+  } catch (err) {
+    console.warn('SheetJS binary parse error:', err);
   }
 
-  // If binary parsing didn't find data (e.g. HTML/XML/CSV formatted report), parse as text
+  // Strategy 2: Text reading with Windows-1252 / ISO-8859-1 (for HTML/XML/CSV exports from Domínio)
   if (Object.keys(sheets).length === 0) {
     let text = await readAsTextWithEncoding(file, 'windows-1252');
-    if (!text || text.includes('')) {
+    if (!text || text.length === 0) {
       text = await readAsTextWithEncoding(file, 'utf-8');
     }
 
-    if (text.includes('<table') || text.includes('<TABLE') || text.includes('<html') || text.includes('<HTML') || text.includes('<tr') || text.includes('<TR')) {
-      const htmlMatrix = parseHtmlTable(text);
-      if (htmlMatrix.length > 0) {
-        sheets['Planilha1'] = processRawMatrix(htmlMatrix);
-        sheetNames = ['Planilha1'];
-      }
-    } else if (text.includes('<?xml') && text.includes('<Workbook')) {
-      const xmlMatrix = parseXmlSpreadsheet(text);
-      if (xmlMatrix.length > 0) {
-        sheets['Planilha1'] = processRawMatrix(xmlMatrix);
-        sheetNames = ['Planilha1'];
-      }
-    } else {
-      const csvMatrix = parseDelimitedText(text);
-      if (csvMatrix.length > 0) {
-        sheets['Planilha1'] = processRawMatrix(csvMatrix);
-        sheetNames = ['Planilha1'];
-      }
-    }
-
-    // Fallback: try SheetJS string parse
-    if (Object.keys(sheets).length === 0 && text.trim().length > 0) {
-      try {
-        const workbook = XLSX.read(text, { type: 'string', cellDates: true });
-        sheetNames = workbook.SheetNames || [];
-        for (const name of sheetNames) {
-          const sheet = workbook.Sheets[name];
-          const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
-          const processed = processRawMatrix(rawData);
-          if (processed.rawMatrix.length > 0) {
-            sheets[name] = processed;
-          }
+    if (text && text.length > 0) {
+      if (text.includes('<table') || text.includes('<TABLE') || text.includes('<html') || text.includes('<HTML') || text.includes('<tr') || text.includes('<TR')) {
+        const htmlMatrix = parseHtmlTable(text);
+        if (htmlMatrix.length > 0) {
+          sheets['Razão'] = processRawMatrix(htmlMatrix);
+          sheetNames = ['Razão'];
         }
-      } catch (e) {
-        console.warn('SheetJS string parse error:', e);
+      } else if (text.includes('<?xml') && text.includes('<Workbook')) {
+        const xmlMatrix = parseXmlSpreadsheet(text);
+        if (xmlMatrix.length > 0) {
+          sheets['Razão'] = processRawMatrix(xmlMatrix);
+          sheetNames = ['Razão'];
+        }
+      } else {
+        const csvMatrix = parseDelimitedText(text);
+        if (csvMatrix.length > 0) {
+          sheets['Razão'] = processRawMatrix(csvMatrix);
+          sheetNames = ['Razão'];
+        }
+      }
+
+      // Strategy 3: SheetJS string read fallback
+      if (Object.keys(sheets).length === 0) {
+        try {
+          const workbook = XLSX.read(text, { type: 'string' });
+          if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
+            for (const name of workbook.SheetNames) {
+              const sheet = workbook.Sheets[name];
+              const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
+              const processed = processRawMatrix(rawData);
+              if (processed.rawMatrix.length > 0) {
+                sheets[name] = processed;
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('SheetJS string parse error:', e);
+        }
       }
     }
   }
