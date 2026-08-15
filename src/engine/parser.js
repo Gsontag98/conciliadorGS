@@ -1,18 +1,42 @@
 import * as XLSX from 'xlsx';
 
+function isBinaryExcel(u8) {
+  if (!u8 || u8.length < 4) return false;
+  // OLE2 / BIFF8 (.xls): D0 CF 11 E0
+  if (u8[0] === 0xD0 && u8[1] === 0xCF && u8[2] === 0x11 && u8[3] === 0xE0) return true;
+  // ZIP / XLSX (.xlsx): 50 4B
+  if (u8[0] === 0x50 && u8[1] === 0x4B) return true;
+  return false;
+}
+
 /**
- * Ensures a worksheet has a valid `!ref` range by scanning its cell keys.
- * Crucial for Domínio .xls exports where !ref is omitted or malformed.
+ * Universal worksheet extractor:
+ * 1. Tries standard sheet_to_json.
+ * 2. If empty or failed, scans all cell coordinates manually to reconstruct rows.
  */
-function ensureSheetRef(sheet, diag) {
-  if (!sheet) return;
-  const keys = Object.keys(sheet).filter(k => !k.startsWith('!'));
-  if (keys.length === 0) {
-    diag?.log(`[AVISO] A planilha não possui células com dados.`);
-    return;
+function getSheetDataMatrix(sheet, diag) {
+  if (!sheet) return [];
+
+  let rawData = [];
+  try {
+    rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
+    if (Array.isArray(rawData) && rawData.length > 0) {
+      diag?.log(`[SHEET_TO_JSON] ${rawData.length} linhas obtidas via sheet_to_json.`);
+      return rawData;
+    }
+  } catch (e) {
+    diag?.log(`[AVISO] sheet_to_json direto falhou: ${e.message}`);
   }
 
+  // Fallback: iterate over all cell keys
+  const keys = Object.keys(sheet).filter(k => !k.startsWith('!'));
+  diag?.log(`[RECUPERAÇÃO] Tentando reconstruir planilha a partir de ${keys.length} células isoladas...`);
+
+  if (keys.length === 0) return [];
+
   let minR = Infinity, maxR = 0, minC = Infinity, maxC = 0;
+  const cellMap = {};
+
   for (const k of keys) {
     try {
       const decoded = XLSX.utils.decode_cell(k);
@@ -20,50 +44,33 @@ function ensureSheetRef(sheet, diag) {
       if (decoded.r > maxR) maxR = decoded.r;
       if (decoded.c < minC) minC = decoded.c;
       if (decoded.c > maxC) maxC = decoded.c;
+      const cell = sheet[k];
+      cellMap[`${decoded.r},${decoded.c}`] = cell ? (cell.w !== undefined && cell.w !== '' ? cell.w : cell.v) : null;
     } catch {}
   }
 
-  if (minR !== Infinity) {
-    const rangeStr = XLSX.utils.encode_range({
-      s: { r: minR, c: minC },
-      e: { r: maxR, c: maxC }
-    });
-    sheet['!ref'] = rangeStr;
-    diag?.log(`[REF] Intervalo recalculado: ${rangeStr} (${keys.length} células preenchidas, linhas ${minR + 1} a ${maxR + 1}, colunas ${minC + 1} a ${maxC + 1})`);
-  }
-}
+  if (minR === Infinity) return [];
 
-function getHexPreview(u8, length = 32) {
-  const slice = u8.slice(0, Math.min(u8.length, length));
-  const hex = Array.from(slice).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-  const ascii = Array.from(slice).map(b => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join('');
-  return { hex, ascii };
-}
+  const rangeStr = XLSX.utils.encode_range({
+    s: { r: minR, c: minC },
+    e: { r: maxR, c: maxC }
+  });
+  sheet['!ref'] = rangeStr;
+  diag?.log(`[REF RECONSTRUÍDO] ${rangeStr}: linhas ${minR + 1} a ${maxR + 1}, colunas ${minC + 1} a ${maxC + 1}`);
 
-function identifyFileType(u8, textSample) {
-  if (u8 && u8.length >= 4) {
-    if (u8[0] === 0xD0 && u8[1] === 0xCF && u8[2] === 0x11 && u8[3] === 0xE0) {
-      return { type: 'BIFF8_XLS', name: 'Microsoft Excel 97-2003 (.xls binário / OLE2)' };
+  rawData = [];
+  for (let r = minR; r <= maxR; r++) {
+    const row = [];
+    for (let c = minC; c <= maxC; c++) {
+      row.push(cellMap[`${r},${c}`] !== undefined ? cellMap[`${r},${c}`] : null);
     }
-    if (u8[0] === 0x50 && u8[1] === 0x4B) {
-      return { type: 'ZIP_XLSX', name: 'Microsoft Excel OpenXML (.xlsx / ZIP)' };
+    if (row.some(val => val !== null && val !== undefined && String(val).trim() !== '')) {
+      rawData.push(row);
     }
   }
 
-  if (textSample) {
-    const trimmed = textSample.trim();
-    if (trimmed.includes('<table') || trimmed.includes('<TABLE') || trimmed.includes('<html') || trimmed.includes('<HTML') || trimmed.includes('<tr') || trimmed.includes('<TR')) {
-      return { type: 'HTML_TABLE', name: 'Relatório formatado em Tabela HTML' };
-    }
-    if (trimmed.startsWith('<?xml') || trimmed.includes('<Workbook')) {
-      return { type: 'XML_2003', name: 'Microsoft XML Spreadsheet 2003' };
-    }
-    if (trimmed.includes(';') || trimmed.includes('\t') || trimmed.includes(',')) {
-      return { type: 'DELIMITED_TEXT', name: 'Texto Delimitado (CSV / TSV)' };
-    }
-  }
-
-  return { type: 'UNKNOWN', name: 'Formato não identificado' };
+  diag?.log(`[MATRIZ CONSTRUÍDA] ${rawData.length} linhas montadas.`);
+  return rawData;
 }
 
 function parseHtmlTable(htmlText, diag) {
@@ -204,6 +211,39 @@ function readAsTextWithEncoding(file, encoding = 'windows-1252') {
     reader.onerror = () => resolve('');
     reader.readAsText(file, encoding);
   });
+}
+
+function getHexPreview(u8, length = 32) {
+  const slice = u8.slice(0, Math.min(u8.length, length));
+  const hex = Array.from(slice).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+  const ascii = Array.from(slice).map(b => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join('');
+  return { hex, ascii };
+}
+
+function identifyFileType(u8, textSample) {
+  if (u8 && u8.length >= 4) {
+    if (u8[0] === 0xD0 && u8[1] === 0xCF && u8[2] === 0x11 && u8[3] === 0xE0) {
+      return { type: 'BIFF8_XLS', name: 'Microsoft Excel 97-2003 (.xls binário / OLE2)' };
+    }
+    if (u8[0] === 0x50 && u8[1] === 0x4B) {
+      return { type: 'ZIP_XLSX', name: 'Microsoft Excel OpenXML (.xlsx / ZIP)' };
+    }
+  }
+
+  if (textSample) {
+    const trimmed = textSample.trim();
+    if (trimmed.includes('<table') || trimmed.includes('<TABLE') || trimmed.includes('<html') || trimmed.includes('<HTML') || trimmed.includes('<tr') || trimmed.includes('<TR')) {
+      return { type: 'HTML_TABLE', name: 'Relatório formatado em Tabela HTML' };
+    }
+    if (trimmed.startsWith('<?xml') || trimmed.includes('<Workbook')) {
+      return { type: 'XML_2003', name: 'Microsoft XML Spreadsheet 2003' };
+    }
+    if (trimmed.includes(';') || trimmed.includes('\t') || trimmed.includes(',')) {
+      return { type: 'DELIMITED_TEXT', name: 'Texto Delimitado (CSV / TSV)' };
+    }
+  }
+
+  return { type: 'UNKNOWN', name: 'Formato não identificado' };
 }
 
 /**
@@ -432,15 +472,15 @@ export async function parseFile(file) {
     try {
       diag.log(`[SHEETJS] Tentando leitura binária com XLSX.read(bytes, { type: 'array' })...`);
       const workbook = XLSX.read(bytes, { type: 'array' });
-      if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
-        sheetNames = workbook.SheetNames;
-        diag.log(`[SHEETJS OK] ${sheetNames.length} aba(s) encontradas: [${sheetNames.join(', ')}]`);
-        for (const name of sheetNames) {
+      if (workbook && workbook.Sheets) {
+        const sheetKeys = Object.keys(workbook.Sheets);
+        sheetNames = workbook.SheetNames || sheetKeys;
+        diag.log(`[SHEETJS OK] ${sheetKeys.length} aba(s) encontradas: [${sheetKeys.join(', ')}]`);
+
+        for (const name of sheetKeys) {
           const sheet = workbook.Sheets[name];
           if (sheet) {
-            ensureSheetRef(sheet, diag);
-            const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
-            diag.log(`[ABA "${name}"] ${rawData.length} linhas brutas extraídas com sheet_to_json.`);
+            const rawData = getSheetDataMatrix(sheet, diag);
             if (Array.isArray(rawData) && rawData.length > 0) {
               const processed = processRawMatrix(rawData, diag);
               if (processed.rawMatrix.length > 0) {
@@ -459,14 +499,14 @@ export async function parseFile(file) {
       try {
         const binStr = await readFileAsBinaryString(file);
         const workbook = XLSX.read(binStr, { type: 'binary' });
-        if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
-          sheetNames = workbook.SheetNames;
-          diag.log(`[SHEETJS BINARY OK] ${sheetNames.length} aba(s) encontradas.`);
-          for (const name of sheetNames) {
+        if (workbook && workbook.Sheets) {
+          const sheetKeys = Object.keys(workbook.Sheets);
+          sheetNames = workbook.SheetNames || sheetKeys;
+          diag.log(`[SHEETJS BINARY OK] ${sheetKeys.length} aba(s) encontradas.`);
+          for (const name of sheetKeys) {
             const sheet = workbook.Sheets[name];
             if (sheet) {
-              ensureSheetRef(sheet, diag);
-              const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
+              const rawData = getSheetDataMatrix(sheet, diag);
               if (Array.isArray(rawData) && rawData.length > 0) {
                 const processed = processRawMatrix(rawData, diag);
                 if (processed.rawMatrix.length > 0) {
