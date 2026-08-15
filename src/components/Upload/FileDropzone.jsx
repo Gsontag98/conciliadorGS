@@ -1,20 +1,22 @@
 import { useState, useRef } from 'react';
-import { Upload, CheckCircle, AlertCircle, Sliders } from 'lucide-react';
+import { Upload, CheckCircle, AlertCircle, Sliders, Terminal } from 'lucide-react';
 import { parseFile } from '../../engine/parser.js';
 import { autoDetect, normalizeData } from '../../engine/mapper.js';
 import ColumnMappingModal from './ColumnMappingModal.jsx';
+import DiagnosticModal from './DiagnosticModal.jsx';
 import useAppStore from '../../store/useAppStore.js';
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
 export default function FileDropzone({ type }) {
   const [isDragging, setIsDragging] = useState(false);
-  const [preview, setPreview] = useState(null);
   const [error, setError] = useState(null);
   const [fileName, setFileName] = useState('');
   const [rawSheetData, setRawSheetData] = useState(null);
   const [currentMapping, setCurrentMapping] = useState(null);
+  const [diagnostics, setDiagnostics] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isDiagOpen, setIsDiagOpen] = useState(false);
 
   const fileInputRef = useRef(null);
   const { setBankFile, setSupplierFile, addToast, bankFile, supplierFile } = useAppStore();
@@ -29,6 +31,7 @@ export default function FileDropzone({ type }) {
 
     try {
       const parsed = await parseFile(file);
+      setDiagnostics(parsed.diagnostics);
 
       // Check if any sheet has rawMatrix or rows
       let sheetData = null;
@@ -44,7 +47,7 @@ export default function FileDropzone({ type }) {
       }
 
       if (!sheetData || !sheetData.rawMatrix || sheetData.rawMatrix.length === 0) {
-        throw new Error('Nenhum dado encontrado no arquivo. O arquivo parece estar vazio.');
+        throw new Error('Nenhum dado encontrado no arquivo. O arquivo parece estar vazio ou não foi possível decodificar.');
       }
 
       setRawSheetData(sheetData);
@@ -63,21 +66,17 @@ export default function FileDropzone({ type }) {
         size: file.size,
         parsed: sheetData,
         items,
-        mapping
+        mapping,
+        diagnostics: parsed.diagnostics
       };
 
       if (type === 'bank') setBankFile(fileData);
       else setSupplierFile(fileData);
 
       if (items.length > 0) {
-        setPreview({
-          headers: sheetData.headers.slice(0, 6),
-          sampleRows: sheetData.rows.slice(0, 5),
-          itemCount: items.length
-        });
-        addToast(`✅ ${file.name}: ${items.length} lançamentos carregados`, 'success');
+        addToast(`✅ ${file.name}: ${items.length} lançamentos carregados com sucesso!`, 'success');
       } else {
-        setError(`Lançamentos não detectados automaticamente. Clique em "Mapear Colunas Manualmente" para selecionar.`);
+        setError(`Lançamentos não associados automaticamente. Clique em "Ajustar Colunas" para selecionar.`);
         setIsModalOpen(true);
       }
     } catch (err) {
@@ -123,25 +122,37 @@ export default function FileDropzone({ type }) {
           type="file"
           ref={fileInputRef}
           onChange={onFileChange}
-          accept=".xlsx,.xls,.xlsb,.csv"
+          accept=".xlsx,.xls,.xlsb,.csv,.txt,.xml"
         />
 
         {hasLoadedItems ? (
           <>
             <CheckCircle className="dropzone-icon" size={42} />
             <div className="dropzone-title">{currentStoreFile.name || fileName}</div>
-            <div className="file-info" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div className="file-info" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
               <span>✅ {currentStoreFile.items.length} lançamentos válidos</span>
-              <button
-                className="btn btn-secondary"
-                style={{ padding: '4px 8px', fontSize: '0.72rem' }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setIsModalOpen(true);
-                }}
-              >
-                <Sliders size={12} /> Ajustar Colunas
-              </button>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '4px 8px', fontSize: '0.72rem' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsDiagOpen(true);
+                  }}
+                >
+                  <Terminal size={12} /> Diagnóstico
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '4px 8px', fontSize: '0.72rem' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsModalOpen(true);
+                  }}
+                >
+                  <Sliders size={12} /> Ajustar Colunas
+                </button>
+              </div>
             </div>
             <table className="preview-table">
               <thead>
@@ -166,7 +177,7 @@ export default function FileDropzone({ type }) {
           <>
             <Upload className="dropzone-icon" size={42} />
             <div className="dropzone-title">{label}</div>
-            <div className="dropzone-subtitle">{subtitle} — Arraste ou clique para selecionar (.xlsx)</div>
+            <div className="dropzone-subtitle">{subtitle} — Arraste ou clique para selecionar (.xls, .xlsx)</div>
           </>
         )}
 
@@ -176,18 +187,32 @@ export default function FileDropzone({ type }) {
               <AlertCircle size={14} style={{ minWidth: 14 }} />
               <span>{error}</span>
             </div>
-            {rawSheetData && (
-              <button
-                className="btn btn-primary"
-                style={{ width: 'fit-content', padding: '6px 12px', fontSize: '0.75rem', marginTop: 4 }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setIsModalOpen(true);
-                }}
-              >
-                <Sliders size={14} /> Mapear Colunas Manualmente
-              </button>
-            )}
+            <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+              {diagnostics && (
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsDiagOpen(true);
+                  }}
+                >
+                  <Terminal size={14} /> Ver Diagnóstico
+                </button>
+              )}
+              {rawSheetData && (
+                <button
+                  className="btn btn-primary"
+                  style={{ padding: '6px 12px', fontSize: '0.75rem' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsModalOpen(true);
+                  }}
+                >
+                  <Sliders size={14} /> Mapear Colunas Manualmente
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -199,6 +224,12 @@ export default function FileDropzone({ type }) {
         currentMapping={currentMapping || currentStoreFile?.mapping}
         fileName={fileName || currentStoreFile?.name}
         type={type}
+      />
+
+      <DiagnosticModal
+        isOpen={isDiagOpen}
+        onClose={() => setIsDiagOpen(false)}
+        diagnostics={diagnostics || currentStoreFile?.diagnostics}
       />
     </>
   );

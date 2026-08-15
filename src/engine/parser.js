@@ -4,10 +4,13 @@ import * as XLSX from 'xlsx';
  * Ensures a worksheet has a valid `!ref` range by scanning its cell keys.
  * Crucial for Domínio .xls exports where !ref is omitted or malformed.
  */
-function ensureSheetRef(sheet) {
+function ensureSheetRef(sheet, diag) {
   if (!sheet) return;
   const keys = Object.keys(sheet).filter(k => !k.startsWith('!'));
-  if (keys.length === 0) return;
+  if (keys.length === 0) {
+    diag?.log(`[AVISO] A planilha não possui células com dados.`);
+    return;
+  }
 
   let minR = Infinity, maxR = 0, minC = Infinity, maxC = 0;
   for (const k of keys) {
@@ -21,29 +24,57 @@ function ensureSheetRef(sheet) {
   }
 
   if (minR !== Infinity) {
-    sheet['!ref'] = XLSX.utils.encode_range({
+    const rangeStr = XLSX.utils.encode_range({
       s: { r: minR, c: minC },
       e: { r: maxR, c: maxC }
     });
+    sheet['!ref'] = rangeStr;
+    diag?.log(`[REF] Intervalo recalculado: ${rangeStr} (${keys.length} células preenchidas, linhas ${minR + 1} a ${maxR + 1}, colunas ${minC + 1} a ${maxC + 1})`);
   }
 }
 
-function isBinaryExcel(u8) {
-  if (!u8 || u8.length < 4) return false;
-  // OLE2 / BIFF8 (.xls): D0 CF 11 E0
-  if (u8[0] === 0xD0 && u8[1] === 0xCF && u8[2] === 0x11 && u8[3] === 0xE0) return true;
-  // ZIP / XLSX (.xlsx): 50 4B
-  if (u8[0] === 0x50 && u8[1] === 0x4B) return true;
-  return false;
+function getHexPreview(u8, length = 32) {
+  const slice = u8.slice(0, Math.min(u8.length, length));
+  const hex = Array.from(slice).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+  const ascii = Array.from(slice).map(b => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join('');
+  return { hex, ascii };
 }
 
-function parseHtmlTable(htmlText) {
+function identifyFileType(u8, textSample) {
+  if (u8 && u8.length >= 4) {
+    if (u8[0] === 0xD0 && u8[1] === 0xCF && u8[2] === 0x11 && u8[3] === 0xE0) {
+      return { type: 'BIFF8_XLS', name: 'Microsoft Excel 97-2003 (.xls binário / OLE2)' };
+    }
+    if (u8[0] === 0x50 && u8[1] === 0x4B) {
+      return { type: 'ZIP_XLSX', name: 'Microsoft Excel OpenXML (.xlsx / ZIP)' };
+    }
+  }
+
+  if (textSample) {
+    const trimmed = textSample.trim();
+    if (trimmed.includes('<table') || trimmed.includes('<TABLE') || trimmed.includes('<html') || trimmed.includes('<HTML') || trimmed.includes('<tr') || trimmed.includes('<TR')) {
+      return { type: 'HTML_TABLE', name: 'Relatório formatado em Tabela HTML' };
+    }
+    if (trimmed.startsWith('<?xml') || trimmed.includes('<Workbook')) {
+      return { type: 'XML_2003', name: 'Microsoft XML Spreadsheet 2003' };
+    }
+    if (trimmed.includes(';') || trimmed.includes('\t') || trimmed.includes(',')) {
+      return { type: 'DELIMITED_TEXT', name: 'Texto Delimitado (CSV / TSV)' };
+    }
+  }
+
+  return { type: 'UNKNOWN', name: 'Formato não identificado' };
+}
+
+function parseHtmlTable(htmlText, diag) {
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(htmlText, 'text/html');
     const rows = [];
 
     const trElements = doc.querySelectorAll('tr');
+    diag?.log(`[HTML] ${trElements.length} tags <tr> encontradas no documento.`);
+
     trElements.forEach(tr => {
       const row = [];
       const cells = tr.querySelectorAll('td, th');
@@ -60,20 +91,23 @@ function parseHtmlTable(htmlText) {
       }
     });
 
+    diag?.log(`[HTML] ${rows.length} linhas não-vazias extraídas da tabela HTML.`);
     return rows;
   } catch (e) {
-    console.warn('HTML table parsing failed:', e);
+    diag?.log(`[ERRO HTML] Falha ao processar tabela HTML: ${e.message}`);
     return [];
   }
 }
 
-function parseXmlSpreadsheet(xmlText) {
+function parseXmlSpreadsheet(xmlText, diag) {
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(xmlText, 'text/xml');
     const rows = [];
 
     const rowElements = doc.querySelectorAll('Row');
+    diag?.log(`[XML] ${rowElements.length} elementos <Row> encontrados.`);
+
     rowElements.forEach(rowEl => {
       const row = [];
       const cellElements = rowEl.querySelectorAll('Cell');
@@ -92,14 +126,15 @@ function parseXmlSpreadsheet(xmlText) {
       }
     });
 
+    diag?.log(`[XML] ${rows.length} linhas extraídas do XML.`);
     return rows;
   } catch (e) {
-    console.warn('XML spreadsheet parsing failed:', e);
+    diag?.log(`[ERRO XML] Falha ao processar XML: ${e.message}`);
     return [];
   }
 }
 
-function parseDelimitedText(text) {
+function parseDelimitedText(text, diag) {
   const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
   if (lines.length === 0) return [];
 
@@ -111,6 +146,8 @@ function parseDelimitedText(text) {
   let delimiter = ';';
   if (countTab > countSemi && countTab > countComma) delimiter = '\t';
   else if (countComma > countSemi && countComma > countTab) delimiter = ',';
+
+  diag?.log(`[TEXTO] Delimitador detectado: '${delimiter === '\t' ? '\\t (Tab)' : delimiter}' em ${lines.length} linhas.`);
 
   return lines.map(line => {
     const row = [];
@@ -174,19 +211,25 @@ function readAsTextWithEncoding(file, encoding = 'windows-1252') {
  * Scans the raw matrix to find where data rows begin,
  * then accurately pinpoints the header row and maps all columns.
  */
-export function processRawMatrix(data) {
+export function processRawMatrix(data, diag) {
   if (!data || !Array.isArray(data) || data.length === 0) {
+    diag?.log(`[MATRIZ] Matriz de dados vazia ou nula.`);
     return { headers: [], rows: [], rawMatrix: [], samples: {}, headerRowIdx: 0 };
   }
 
   // Filter out completely empty rows
   const cleanData = data.filter(row => Array.isArray(row) && row.some(c => c !== null && c !== undefined && String(c).trim() !== ''));
-  if (cleanData.length === 0) return { headers: [], rows: [], rawMatrix: [], samples: {}, headerRowIdx: 0 };
+  if (cleanData.length === 0) {
+    diag?.log(`[MATRIZ] Nenhuma linha com conteúdo encontrada.`);
+    return { headers: [], rows: [], rawMatrix: [], samples: {}, headerRowIdx: 0 };
+  }
 
   let maxCols = 0;
   for (const row of cleanData) {
     if (row.length > maxCols) maxCols = row.length;
   }
+
+  diag?.log(`[MATRIZ] ${cleanData.length} linhas válidas, largura máxima: ${maxCols} colunas.`);
 
   // 1. Transaction Anchor Search: find the first row that has a valid date in column 0 or 1
   let firstTransactionRowIdx = -1;
@@ -203,6 +246,12 @@ export function processRawMatrix(data) {
       dateColIdx = 1;
       break;
     }
+  }
+
+  if (firstTransactionRowIdx !== -1) {
+    diag?.log(`[ANCORA] Primeiro lançamento com data detectado na linha ${firstTransactionRowIdx + 1}: [${cleanData[firstTransactionRowIdx].filter(Boolean).slice(0, 4).join(' | ')}]`);
+  } else {
+    diag?.log(`[AVISO ANCORA] Nenhuma linha com data DD/MM/YYYY detectada nas colunas 0 ou 1.`);
   }
 
   // 2. Locate Header Row: look backwards from firstTransactionRowIdx for a row with header keywords
@@ -253,6 +302,8 @@ export function processRawMatrix(data) {
     headerRowIdx = firstTransactionRowIdx > 0 ? firstTransactionRowIdx - 1 : 0;
   }
 
+  diag?.log(`[CABEÇALHO] Linha de cabeçalho selecionada: índice ${headerRowIdx + 1} (${cleanData[headerRowIdx]?.filter(Boolean).join(' | ')})`);
+
   // 3. Build descriptive header names
   const rawHeaders = cleanData[headerRowIdx] || [];
   const headers = [];
@@ -302,6 +353,8 @@ export function processRawMatrix(data) {
     headers.push(h);
   }
 
+  diag?.log(`[COLUNAS] ${headers.length} colunas mapeadas: [${headers.join(', ')}]`);
+
   // 4. Extract data rows
   const rows = [];
   const ignoreRowKeywords = ['TOTAL GERAL', 'TOTAL DO DIA', 'TOTAL DA CONTA', 'SUBTOTAL', 'SALDO ATUAL', 'SALDO FINAL', 'TRANSPORTE', 'A TRANSPORTAR'];
@@ -340,6 +393,8 @@ export function processRawMatrix(data) {
     }
   }
 
+  diag?.log(`[LINHAS] ${rows.length} linhas de dados prontas para conciliação.`);
+
   return {
     headers,
     rows,
@@ -355,23 +410,39 @@ export async function parseFile(file) {
   const sheets = {};
   let sheetNames = [];
 
+  const logs = [];
+  const diag = {
+    log: (msg) => logs.push(`[${new Date().toLocaleTimeString()}] ${msg}`)
+  };
+
+  diag.log(`Iniciando leitura do arquivo: "${file.name}" (${(file.size / 1024).toFixed(1)} KB, tipo: "${file.type || 'desconhecido'}")`);
+
   const arrayBuffer = await readFileAsArrayBuffer(file);
   const bytes = new Uint8Array(arrayBuffer);
-  const isBinary = isBinaryExcel(bytes);
+  const hexInfo = getHexPreview(bytes, 32);
+  const fileType = identifyFileType(bytes);
+
+  diag.log(`[ASSINATURA] Hex: ${hexInfo.hex.substring(0, 48)}... | ASCII: ${hexInfo.ascii.substring(0, 16)}`);
+  diag.log(`[TIPO DETECTADO] ${fileType.name} (${fileType.type})`);
+
+  const isBinary = fileType.type === 'BIFF8_XLS' || fileType.type === 'ZIP_XLSX';
 
   // Strategy 1: Binary parsing for XLSX / XLS
   if (isBinary) {
     try {
+      diag.log(`[SHEETJS] Tentando leitura binária com XLSX.read(bytes, { type: 'array' })...`);
       const workbook = XLSX.read(bytes, { type: 'array' });
       if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
         sheetNames = workbook.SheetNames;
+        diag.log(`[SHEETJS OK] ${sheetNames.length} aba(s) encontradas: [${sheetNames.join(', ')}]`);
         for (const name of sheetNames) {
           const sheet = workbook.Sheets[name];
           if (sheet) {
-            ensureSheetRef(sheet);
+            ensureSheetRef(sheet, diag);
             const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
+            diag.log(`[ABA "${name}"] ${rawData.length} linhas brutas extraídas com sheet_to_json.`);
             if (Array.isArray(rawData) && rawData.length > 0) {
-              const processed = processRawMatrix(rawData);
+              const processed = processRawMatrix(rawData, diag);
               if (processed.rawMatrix.length > 0) {
                 sheets[name] = processed;
               }
@@ -380,7 +451,7 @@ export async function parseFile(file) {
         }
       }
     } catch (err) {
-      console.warn('SheetJS array read error, trying binary string:', err);
+      diag.log(`[AVISO SHEETJS] Leitura como array falhou: ${err.message}. Tentando binary string...`);
     }
 
     // Binary string fallback
@@ -390,13 +461,14 @@ export async function parseFile(file) {
         const workbook = XLSX.read(binStr, { type: 'binary' });
         if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
           sheetNames = workbook.SheetNames;
+          diag.log(`[SHEETJS BINARY OK] ${sheetNames.length} aba(s) encontradas.`);
           for (const name of sheetNames) {
             const sheet = workbook.Sheets[name];
             if (sheet) {
-              ensureSheetRef(sheet);
+              ensureSheetRef(sheet, diag);
               const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
               if (Array.isArray(rawData) && rawData.length > 0) {
-                const processed = processRawMatrix(rawData);
+                const processed = processRawMatrix(rawData, diag);
                 if (processed.rawMatrix.length > 0) {
                   sheets[name] = processed;
                 }
@@ -405,13 +477,14 @@ export async function parseFile(file) {
           }
         }
       } catch (err) {
-        console.warn('SheetJS binary string read error:', err);
+        diag.log(`[ERRO SHEETJS] Leitura binária string falhou: ${err.message}`);
       }
     }
   }
 
   // Strategy 2: Text parsing for HTML / XML / CSV ONLY if NOT a binary file
   if (!isBinary && Object.keys(sheets).length === 0) {
+    diag.log(`[TEXTO] Arquivo não é binário. Lendo como texto (Windows-1252 / Latin1)...`);
     let text = await readAsTextWithEncoding(file, 'windows-1252');
     if (!text || text.length === 0) {
       text = await readAsTextWithEncoding(file, 'utf-8');
@@ -419,28 +492,44 @@ export async function parseFile(file) {
 
     if (text && text.length > 0) {
       if (text.includes('<table') || text.includes('<TABLE') || text.includes('<html') || text.includes('<HTML') || text.includes('<tr') || text.includes('<TR')) {
-        const htmlMatrix = parseHtmlTable(text);
+        diag.log(`[FORMATO] Documento identificado como Tabela HTML.`);
+        const htmlMatrix = parseHtmlTable(text, diag);
         if (htmlMatrix.length > 0) {
-          sheets['Razão'] = processRawMatrix(htmlMatrix);
+          sheets['Razão'] = processRawMatrix(htmlMatrix, diag);
           sheetNames = ['Razão'];
         }
       } else if (text.includes('<?xml') && text.includes('<Workbook')) {
-        const xmlMatrix = parseXmlSpreadsheet(text);
+        diag.log(`[FORMATO] Documento identificado como XML Spreadsheet 2003.`);
+        const xmlMatrix = parseXmlSpreadsheet(text, diag);
         if (xmlMatrix.length > 0) {
-          sheets['Razão'] = processRawMatrix(xmlMatrix);
+          sheets['Razão'] = processRawMatrix(xmlMatrix, diag);
           sheetNames = ['Razão'];
         }
       } else {
-        const csvMatrix = parseDelimitedText(text);
+        diag.log(`[FORMATO] Documento identificado como Texto Delimitado (CSV/TSV).`);
+        const csvMatrix = parseDelimitedText(text, diag);
         if (csvMatrix.length > 0) {
-          sheets['Razão'] = processRawMatrix(csvMatrix);
+          sheets['Razão'] = processRawMatrix(csvMatrix, diag);
           sheetNames = ['Razão'];
         }
       }
     }
   }
 
-  return { sheets, sheetNames: Object.keys(sheets) };
+  diag.log(`[FINALIZADO] Total de abas prontas: ${Object.keys(sheets).length}`);
+
+  return {
+    sheets,
+    sheetNames: Object.keys(sheets),
+    diagnostics: {
+      fileName: file.name,
+      fileSize: file.size,
+      fileType: fileType.name,
+      hexPreview: hexInfo.hex,
+      asciiPreview: hexInfo.ascii,
+      logs
+    }
+  };
 }
 
 export function parseDate(val) {
