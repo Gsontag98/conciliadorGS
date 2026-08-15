@@ -1,5 +1,5 @@
-import { calculateSimilarity, shareDocNumber, extractDocNumbers, extractCnpj } from './similarity';
-import { reconcileWithAI, isConfigured as isAIConfigured } from './ai';
+import { calculateSimilarity, shareDocNumber, extractDocNumbers, extractCnpj } from './similarity.js';
+import { reconcileWithAI, isConfigured as isAIConfigured } from './ai.js';
 
 function getDaysDiff(d1Str, d2Str) {
   const d1 = new Date(d1Str);

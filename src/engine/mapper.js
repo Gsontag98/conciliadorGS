@@ -1,5 +1,5 @@
-import { normalizeText, extractCnpj, extractDocNumbers } from './similarity';
-import { parseDate, parseAmount } from './parser';
+import { normalizeText, extractCnpj, extractDocNumbers } from './similarity.js';
+import { parseDate, parseAmount } from './parser.js';
 
 const FIELDS = [
   {
