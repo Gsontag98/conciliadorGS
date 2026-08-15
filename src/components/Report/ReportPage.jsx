@@ -28,12 +28,12 @@ export default function ReportPage() {
   }, {});
 
   const passInfo = [
-    { pass: 1, name: 'Match Exato (Valor + Data + Doc)', confidence: '100%', color: 'var(--success)' },
-    { pass: 2, name: 'Valor + Janela de Data (±3 dias)', confidence: '95%', color: 'var(--success)' },
-    { pass: 3, name: 'Valor + Similaridade Textual', confidence: '85%', color: 'var(--info)' },
-    { pass: 4, name: 'Soma Combinatória N:1', confidence: '80%', color: 'var(--info)' },
-    { pass: 5, name: 'Match Fuzzy Completo', confidence: '70%', color: 'var(--warning)' },
-    { pass: 7, name: 'IA Gemini — Análise Semântica', confidence: '70-100%', color: 'var(--ai)' },
+    { pass: 1, name: 'Match 100% Exato (CNPJ + Valor)', confidence: '100%', color: 'var(--success)' },
+    { pass: 2, name: 'Match 100% Exato (NF/Doc + Valor)', confidence: '100%', color: 'var(--success)' },
+    { pass: 3, name: 'Match Exato (Valor + Data + Nome)', confidence: '100%', color: 'var(--success)' },
+    { pass: 4, name: 'Similaridade de Fornecedor (Valor Exato)', confidence: '95%', color: 'var(--info)' },
+    { pass: 5, name: 'Soma Combinatória N:1 (Valor Exato)', confidence: '90%', color: 'var(--info)' },
+    { pass: 99, name: 'Conciliação Manual do Usuário', confidence: '100%', color: 'var(--accent-primary)' },
   ];
 
   return (

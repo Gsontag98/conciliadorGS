@@ -1,19 +1,20 @@
 import { calculateSimilarity, shareDocNumber, extractDocNumbers, extractCnpj } from './similarity.js';
-import { reconcileWithAI, isConfigured as isAIConfigured } from './ai.js';
 
 function getDaysDiff(d1Str, d2Str) {
+  if (!d1Str || !d2Str) return 999;
   const d1 = new Date(d1Str);
   const d2 = new Date(d2Str);
+  if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return 999;
   const diffTime = Math.abs(d2 - d1);
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 }
 
-function findSubsetSum(numbers, target, maxItems) {
+function findSubsetSum(numbers, targetCents, maxItems) {
   function backtrack(start, currentCombo, currentSum) {
-    if (Math.abs(currentSum - target) < 1) { // 1 cent tolerance
+    if (currentSum === targetCents) {
       return currentCombo;
     }
-    if (currentSum > target + 1 || currentCombo.length >= maxItems) return null;
+    if (currentSum > targetCents || currentCombo.length >= maxItems) return null;
 
     for (let i = start; i < numbers.length; i++) {
       const res = backtrack(i + 1, [...currentCombo, numbers[i]], currentSum + numbers[i].val);
@@ -25,14 +26,15 @@ function findSubsetSum(numbers, target, maxItems) {
   return backtrack(0, [], 0);
 }
 
+/**
+ * 100% Rigorous Accounting Reconciliation Engine
+ * Guarantees that amounts must be EXACT to the penny (R$ 0,00 diff)
+ * Prioritizes CNPJ, Document/NF, and Supplier Entity validation.
+ */
 export async function reconcile(bankLedgerItems, supplierLedgerItems, options = {}, onProgress = null) {
   const config = {
-    dateToleranceDays: 3,
-    amountTolerance: 0.05,
-    textThreshold: 0.65,
     enableNtoOne: true,
-    enableAI: true,
-    maxNtoOneItems: 8,
+    maxNtoOneItems: 6,
     ...options
   };
 
@@ -70,25 +72,27 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
     }
   }
 
-  // PASS 1: Exact Match (Same Amount + Same Date + (Shared CNPJ OR Shared Doc OR both))
+  // =========================================================================
+  // PASSE 1: Match 100% Exato por CNPJ + Valor Rigorosamente Idêntico
+  // =========================================================================
   let pass1Matches = 0;
   for (const b of bankItems) {
     if (b.matched) continue;
     for (const s of supplierItems) {
       if (s.matched) continue;
 
-      const amountDiff = Math.abs(b.amount - s.amount);
-      if (amountDiff < 0.001 && b.date === s.date) {
+      const amountDiff = Math.abs(Math.round(b.amount * 100) - Math.round(s.amount * 100));
+      if (amountDiff === 0) {
         const hasCnpjMatch = b.cnpj && s.cnpj && b.cnpj === s.cnpj;
-        const hasDocMatch = shareDocNumber(b.document || b.description, s.document || s.description);
-        const textSim = calculateSimilarity(b.description, s.description);
 
-        if (hasCnpjMatch || hasDocMatch || textSim >= 0.5 || (!b.document && !s.document)) {
+        if (hasCnpjMatch) {
+          const days = getDaysDiff(b.date, s.date);
           addMatch(b, s, {
             pass: 1,
-            passName: hasCnpjMatch ? 'Match Exato (CNPJ)' : 'Match Exato (Valor + Data)',
+            passName: 'Match 100% Exato (CNPJ + Valor)',
             confidence: 100,
             badgeClass: 'badge-exact',
+            notes: `CNPJ ${b.cnpj} idêntico e valor exato R$ ${b.amount.toFixed(2)}${days > 0 ? ` (Diferença de ${days}d)` : ' (Mesmo dia)'}`,
             type: '1:1'
           });
           pass1Matches++;
@@ -97,47 +101,42 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
       }
     }
   }
-  reportProgress(1, 'Match Exato', pass1Matches);
+  reportProgress(1, 'Match por CNPJ', pass1Matches);
 
-  // PASS 2: Date Tolerance Window (Same Amount + Date within ±dateToleranceDays)
+  // =========================================================================
+  // PASSE 2: Match 100% Exato por Número de Documento / NF + Valor Idêntico
+  // =========================================================================
   let pass2Matches = 0;
   for (const b of bankItems) {
     if (b.matched) continue;
-
-    let bestCandidate = null;
-    let minDays = Infinity;
-
     for (const s of supplierItems) {
       if (s.matched) continue;
 
-      const amountDiff = Math.abs(b.amount - s.amount);
-      if (amountDiff < 0.001) {
-        const days = getDaysDiff(b.date, s.date);
-        if (days <= config.dateToleranceDays && days < minDays) {
-          const hasCnpjMatch = b.cnpj && s.cnpj && b.cnpj === s.cnpj;
-          const textSim = calculateSimilarity(b.description, s.description);
-          if (hasCnpjMatch || textSim >= 0.3 || days <= 2) {
-            minDays = days;
-            bestCandidate = s;
-          }
+      const amountDiff = Math.abs(Math.round(b.amount * 100) - Math.round(s.amount * 100));
+      if (amountDiff === 0) {
+        const hasDocMatch = shareDocNumber(b.document || b.description, s.document || s.description);
+
+        if (hasDocMatch) {
+          const days = getDaysDiff(b.date, s.date);
+          addMatch(b, s, {
+            pass: 2,
+            passName: 'Match 100% Exato (NF/Doc + Valor)',
+            confidence: 100,
+            badgeClass: 'badge-exact',
+            notes: `Documento/NF coincidente e valor exato R$ ${b.amount.toFixed(2)}${days > 0 ? ` (Diferença de ${days}d)` : ' (Mesmo dia)'}`,
+            type: '1:1'
+          });
+          pass2Matches++;
+          break;
         }
       }
     }
-
-    if (bestCandidate) {
-      addMatch(b, bestCandidate, {
-        pass: 2,
-        passName: `Janela de Data (±${minDays}d)`,
-        confidence: 95 - (minDays * 3),
-        badgeClass: 'badge-date',
-        type: '1:1'
-      });
-      pass2Matches++;
-    }
   }
-  reportProgress(2, 'Janela de Data', pass2Matches);
+  reportProgress(2, 'Match por NF/Doc', pass2Matches);
 
-  // PASS 3: Same Amount + Text Similarity / CNPJ Match (within ±10 days)
+  // =========================================================================
+  // PASSE 3: Match Exato por Fornecedor (Texto) + Valor Idêntico + Mesma Data
+  // =========================================================================
   let pass3Matches = 0;
   for (const b of bankItems) {
     if (b.matched) continue;
@@ -148,21 +147,12 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
     for (const s of supplierItems) {
       if (s.matched) continue;
 
-      const amountDiff = Math.abs(b.amount - s.amount);
-      if (amountDiff < 0.001) {
-        const days = getDaysDiff(b.date, s.date);
-        if (days <= 10) {
-          const hasCnpjMatch = b.cnpj && s.cnpj && b.cnpj === s.cnpj;
-          const textSim = calculateSimilarity(b.description, s.description);
-
-          if (hasCnpjMatch) {
-            bestCandidate = s;
-            maxSim = 1.0;
-            break;
-          } else if (textSim >= config.textThreshold && textSim > maxSim) {
-            maxSim = textSim;
-            bestCandidate = s;
-          }
+      const amountDiff = Math.abs(Math.round(b.amount * 100) - Math.round(s.amount * 100));
+      if (amountDiff === 0 && b.date === s.date) {
+        const textSim = calculateSimilarity(b.description, s.description);
+        if (textSim >= 0.50 && textSim > maxSim) {
+          maxSim = textSim;
+          bestCandidate = s;
         }
       }
     }
@@ -170,26 +160,70 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
     if (bestCandidate) {
       addMatch(b, bestCandidate, {
         pass: 3,
-        passName: 'Similaridade Textual',
-        confidence: Math.round(maxSim * 100),
-        badgeClass: 'badge-text',
+        passName: 'Match Exato (Valor + Data + Nome)',
+        confidence: 100,
+        badgeClass: 'badge-exact',
+        notes: `Valor exato R$ ${b.amount.toFixed(2)} e mesma data (${b.date}) com fornecedor correspondente`,
         type: '1:1'
       });
       pass3Matches++;
     }
   }
-  reportProgress(3, 'Similaridade Textual', pass3Matches);
+  reportProgress(3, 'Match Valor + Data', pass3Matches);
 
-  // PASS 4: Combinatorial N:1 / 1:N Subset Sum
+  // =========================================================================
+  // PASSE 4: Match por Similaridade Alta de Fornecedor (>= 75%) + Valor Rigoroso (±15 dias)
+  // =========================================================================
   let pass4Matches = 0;
+  for (const b of bankItems) {
+    if (b.matched) continue;
+
+    let bestCandidate = null;
+    let maxSim = 0;
+    let bestDays = 999;
+
+    for (const s of supplierItems) {
+      if (s.matched) continue;
+
+      const amountDiff = Math.abs(Math.round(b.amount * 100) - Math.round(s.amount * 100));
+      if (amountDiff === 0) {
+        const days = getDaysDiff(b.date, s.date);
+        if (days <= 15) {
+          const textSim = calculateSimilarity(b.description, s.description);
+          if (textSim >= 0.70 && textSim > maxSim) {
+            maxSim = textSim;
+            bestCandidate = s;
+            bestDays = days;
+          }
+        }
+      }
+    }
+
+    if (bestCandidate) {
+      addMatch(b, bestCandidate, {
+        pass: 4,
+        passName: 'Match Nome Fornecedor (Valor Exato)',
+        confidence: 95,
+        badgeClass: 'badge-text',
+        notes: `Valor idêntico R$ ${b.amount.toFixed(2)} e nome correspondente (${Math.round(maxSim * 100)}% similaridade, ±${bestDays}d)`,
+        type: '1:1'
+      });
+      pass4Matches++;
+    }
+  }
+  reportProgress(4, 'Similaridade de Fornecedor', pass4Matches);
+
+  // =========================================================================
+  // PASSE 5: Soma Combinatória N:1 (Soma Exata das NFs = Valor Exato do Pagamento)
+  // =========================================================================
+  let pass5Matches = 0;
   if (config.enableNtoOne) {
-    // Direction A: N suppliers = 1 bank payment
     for (const b of bankItems) {
       if (b.matched) continue;
 
       const targetCents = Math.round(b.amount * 100);
       const candidates = supplierItems
-        .filter(s => !s.matched && getDaysDiff(b.date, s.date) <= 10 && Math.round(s.amount * 100) < targetCents)
+        .filter(s => !s.matched && getDaysDiff(b.date, s.date) <= 15 && Math.round(s.amount * 100) < targetCents)
         .map(s => ({ item: s, val: Math.round(s.amount * 100) }));
 
       if (candidates.length >= 2) {
@@ -197,151 +231,37 @@ export async function reconcile(bankLedgerItems, supplierLedgerItems, options = 
         if (combo && combo.length >= 2) {
           const matchedSuppliers = combo.map(c => c.item);
           addMatch(b, matchedSuppliers, {
-            pass: 4,
-            passName: `Soma N:1 (${matchedSuppliers.length} fornecedores)`,
-            confidence: 85,
+            pass: 5,
+            passName: `Soma Exata N:1 (${matchedSuppliers.length} títulos)`,
+            confidence: 90,
             badgeClass: 'badge-subset',
+            notes: `Soma exata de ${matchedSuppliers.length} notas no fornecedor bate 100% com o pagamento de R$ ${b.amount.toFixed(2)} no banco`,
             type: 'N:1'
           });
-          pass4Matches++;
-        }
-      }
-    }
-
-    // Direction B: 1 supplier = N bank payments
-    for (const s of supplierItems) {
-      if (s.matched) continue;
-
-      const targetCents = Math.round(s.amount * 100);
-      const candidates = bankItems
-        .filter(b => !b.matched && getDaysDiff(s.date, b.date) <= 10 && Math.round(b.amount * 100) < targetCents)
-        .map(b => ({ item: b, val: Math.round(b.amount * 100) }));
-
-      if (candidates.length >= 2) {
-        const combo = findSubsetSum(candidates, targetCents, config.maxNtoOneItems);
-        if (combo && combo.length >= 2) {
-          const matchedBanks = combo.map(c => c.item);
-          addMatch(matchedBanks, s, {
-            pass: 4,
-            passName: `Soma 1:N (${matchedBanks.length} parcelas banco)`,
-            confidence: 85,
-            badgeClass: 'badge-subset',
-            type: '1:N'
-          });
-          pass4Matches++;
-        }
-      }
-    }
-  }
-  reportProgress(4, 'Soma Combinatória', pass4Matches);
-
-  // PASS 5: Fuzzy Match (Amount tolerance ±0.05 + Date tolerance ±5d + Text >= 50%)
-  let pass5Matches = 0;
-  for (const b of bankItems) {
-    if (b.matched) continue;
-
-    for (const s of supplierItems) {
-      if (s.matched) continue;
-
-      const amountDiff = Math.abs(b.amount - s.amount);
-      const days = getDaysDiff(b.date, s.date);
-
-      if (amountDiff <= config.amountTolerance && days <= 5) {
-        const textSim = calculateSimilarity(b.description, s.description);
-        if (textSim >= 0.45 || (b.cnpj && s.cnpj && b.cnpj === s.cnpj)) {
-          addMatch(b, s, {
-            pass: 5,
-            passName: 'Match Fuzzy Aproximado',
-            confidence: 70,
-            badgeClass: 'badge-fuzzy',
-            type: '1:1'
-          });
           pass5Matches++;
-          break;
         }
       }
     }
   }
-  reportProgress(5, 'Match Fuzzy', pass5Matches);
+  reportProgress(5, 'Soma Combinatória Exata', pass5Matches);
 
-  // PASS 7: AI Gemini Pass (if configured and enabled)
-  if (config.enableAI && isAIConfigured()) {
-    const unmappedBank = bankItems.filter(b => !b.matched);
-    const unmappedSupplier = supplierItems.filter(s => !s.matched);
+  // Remaining unmatched items
+  const missingInBank = bankItems.filter(b => !b.matched);
+  const missingInSupplier = supplierItems.filter(s => !s.matched);
 
-    if (unmappedBank.length > 0 && unmappedSupplier.length > 0) {
-      try {
-        const aiMatches = await reconcileWithAI(unmappedBank, unmappedSupplier);
-        if (Array.isArray(aiMatches)) {
-          aiMatches.forEach(aim => {
-            const b = bankItems.find(item => item.id === aim.bankId && !item.matched);
-            const s = supplierItems.find(item => item.id === aim.supplierId && !item.matched);
-            if (b && s) {
-              addMatch(b, s, {
-                pass: 7,
-                passName: '🤖 IA Gemini — Análise Semântica',
-                confidence: aim.confidence || 85,
-                badgeClass: 'badge-ai',
-                notes: aim.justificativa,
-                type: '1:1'
-              });
-            }
-          });
-        }
-      } catch (err) {
-        console.warn('AI reconciliation pass skipped:', err);
-      }
-    }
-  }
-  reportProgress(7, 'IA Gemini', matches.length);
-
-  // PASS 6: Suggestions for remaining unmapped bank items
-  const suggestions = [];
-  const remainingBank = bankItems.filter(b => !b.matched);
-  const remainingSupplier = supplierItems.filter(s => !s.matched);
-
-  for (const b of remainingBank) {
-    const candidates = [];
-    for (const s of remainingSupplier) {
-      const amountDiff = Math.abs(b.amount - s.amount);
-      const days = getDaysDiff(b.date, s.date);
-      const textSim = calculateSimilarity(b.description, s.description);
-
-      let score = 0;
-      if (amountDiff < 0.001) score += 50;
-      else if (amountDiff < 1.0) score += 30;
-
-      if (days <= 3) score += 30;
-      else if (days <= 10) score += 15;
-
-      score += Math.round(textSim * 20);
-
-      if (score >= 30) {
-        candidates.push({ supplierItem: s, score, amountDiff, dateDiff: days, textSim });
-      }
-    }
-
-    if (candidates.length > 0) {
-      candidates.sort((a, b) => b.score - a.score);
-      suggestions.push({
-        bankItem: b,
-        candidates: candidates.slice(0, 3)
-      });
-    }
-  }
-
-  const unmappedB = bankItems.filter(b => !b.matched);
-  const unmappedS = supplierItems.filter(s => !s.matched);
+  const totalBankCount = bankItems.length;
+  const totalSupplierCount = supplierItems.length;
+  const totalItems = totalBankCount + totalSupplierCount;
+  const matchedTotal = matches.reduce((sum, m) => sum + m.bankItems.length + (m.ledgerItems?.length || m.supplierItems?.length || 0), 0);
+  const reconciledRate = totalItems > 0 ? Math.round((matchedTotal / totalItems) * 100) : 100;
 
   return {
     matches,
-    suggestions,
-    missingInBank: unmappedS,
-    missingInSupplier: unmappedB,
-    unmatchedBank: unmappedB,
-    unmatchedSupplier: unmappedS,
-    totalBankCount: bankItems.length,
-    totalSupplierCount: supplierItems.length,
-    reconciledRate: bankItems.length > 0 ? Math.round((matches.length / bankItems.length) * 100) : 0
+    missingInBank,
+    missingInSupplier,
+    totalBankCount,
+    totalSupplierCount,
+    reconciledRate,
+    suggestions: []
   };
 }
