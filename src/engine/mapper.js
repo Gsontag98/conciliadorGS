@@ -89,7 +89,6 @@ export function autoDetect(headers) {
   }
 
   // Fallback for Domínio:
-  // If headers contains "Data", "Histórico", "Débito", "Crédito"
   if (!mapping.date && headers.length > 0) {
     const dHeader = headers.find(h => h.toUpperCase().includes('DATA') || h.toUpperCase().includes('DT'));
     if (dHeader) mapping.date = dHeader;
@@ -99,7 +98,7 @@ export function autoDetect(headers) {
   if (!mapping.description && headers.length > 2) {
     const hHeader = headers.find(h => h.toUpperCase().includes('HIST'));
     if (hHeader) mapping.description = hHeader;
-    else mapping.description = headers[2]; // Column C in Domínio
+    else mapping.description = headers[2];
   }
 
   if (!mapping.debit) {
@@ -119,13 +118,24 @@ export function normalizeData(rows, mapping, sourceName) {
   const normalized = [];
 
   rows.forEach((row, idx) => {
-    // 1. Date extraction - check mapping.date first
+    const rawArray = row.__rawArray || Object.values(row);
+
+    // 1. Date extraction
     let dateStr = null;
     if (mapping.date && row[mapping.date] !== undefined && row[mapping.date] !== null) {
       dateStr = parseDate(row[mapping.date]);
     }
+    if (!dateStr) {
+      for (const cell of rawArray) {
+        const parsed = parseDate(cell);
+        if (parsed) {
+          dateStr = parsed;
+          break;
+        }
+      }
+    }
 
-    // If Column A / mapping.date has no valid date, this is a subheader/title/footer row -> SKIP!
+    // If no valid date found in this row, skip (e.g. Account headers, Saldo anterior, Totals)
     if (!dateStr) {
       return;
     }
@@ -134,8 +144,16 @@ export function normalizeData(rows, mapping, sourceName) {
     let description = '';
     if (mapping.description && row[mapping.description] !== undefined && row[mapping.description] !== null) {
       description = String(row[mapping.description]).trim();
-    } else if (row['Histórico'] !== undefined) {
+    } else if (row['Histórico'] !== undefined && row['Histórico'] !== null) {
       description = String(row['Histórico']).trim();
+    } else {
+      let longestStr = '';
+      for (const cell of rawArray) {
+        if (typeof cell === 'string' && cell.trim().length > longestStr.length && isNaN(parseFloat(cell)) && !parseDate(cell)) {
+          longestStr = cell.trim();
+        }
+      }
+      description = longestStr;
     }
 
     // Skip "SALDO ANTERIOR" or summary descriptions if they slipped through
@@ -145,21 +163,14 @@ export function normalizeData(rows, mapping, sourceName) {
     }
 
     // 3. Amount extraction:
-    // In Conta Banco (sourceName === 'banco'):
-    //   - Crédito = Outflow payments to suppliers
-    //   - Débito = Inflow deposits/receipts
-    // In Conta Fornecedor (sourceName === 'fornecedor'):
-    //   - Débito = Payments made (settlements)
-    //   - Crédito = Invoices entered
     let amount = 0;
     let movementType = '';
 
     const debVal = mapping.debit && row[mapping.debit] !== undefined ? parseAmount(row[mapping.debit]) : (row['Débito'] !== undefined ? parseAmount(row['Débito']) : 0);
     const credVal = mapping.credit && row[mapping.credit] !== undefined ? parseAmount(row[mapping.credit]) : (row['Crédito'] !== undefined ? parseAmount(row['Crédito']) : 0);
-    const amtVal = mapping.amount && row[mapping.amount] !== undefined ? parseAmount(row[mapping.amount]) : 0;
+    const amtVal = mapping.amount && row[mapping.amount] !== undefined ? parseAmount(row[mapping.amount]) : (row['Valor'] !== undefined ? parseAmount(row['Valor']) : 0);
 
     if (sourceName === 'banco') {
-      // In bank, we prioritize Crédito (payments), but support Débito if Crédito is 0
       if (credVal > 0) {
         amount = credVal;
         movementType = 'CREDITO';
@@ -171,7 +182,6 @@ export function normalizeData(rows, mapping, sourceName) {
         movementType = 'DEBITO';
       }
     } else {
-      // In supplier, we prioritize Débito (payments/settlements), but support Crédito if Débito is 0
       if (debVal > 0) {
         amount = debVal;
         movementType = 'DEBITO';
@@ -181,6 +191,28 @@ export function normalizeData(rows, mapping, sourceName) {
       } else if (credVal > 0) {
         amount = credVal;
         movementType = 'CREDITO';
+      }
+    }
+
+    // Fallback amount: scan numeric cells
+    if (amount <= 0) {
+      for (const cell of rawArray) {
+        if (cell === null || cell === undefined || cell === '') continue;
+        if (typeof cell === 'number') {
+          if (cell < 1900 || cell > 2100) {
+            const parsed = parseAmount(cell);
+            if (parsed > 0) {
+              amount = parsed;
+              break;
+            }
+          }
+        } else if (typeof cell === 'string') {
+          const parsed = parseAmount(cell);
+          if (parsed > 0 && !cell.match(/^\d{4}-\d{2}-\d{2}$/) && !cell.match(/^(\d{1,2})[\/\-\.](\d{1,2})/)) {
+            amount = parsed;
+            break;
+          }
+        }
       }
     }
 
@@ -198,11 +230,8 @@ export function normalizeData(rows, mapping, sourceName) {
       document = String(row['Lote']).trim();
     }
 
-    // Extract explicit document numbers from description (e.g. DOCUMENTO 9559)
     const docNumbers = extractDocNumbers(description);
     const explicitDoc = docNumbers.length > 0 ? docNumbers[0] : document;
-
-    // Extract CNPJ from description
     const cnpj = extractCnpj(description);
 
     normalized.push({

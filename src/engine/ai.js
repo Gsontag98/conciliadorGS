@@ -4,19 +4,25 @@ const MODEL_KEY = 'conciliador_gemini_model';
 const MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-flash'];
 
 export function getApiKey() {
+  if (typeof window === 'undefined' || !window.localStorage) return '';
   return localStorage.getItem(STORAGE_KEY) || '';
 }
 
 export function saveApiKey(key) {
-  localStorage.setItem(STORAGE_KEY, key);
+  if (typeof window !== 'undefined' && window.localStorage) {
+    localStorage.setItem(STORAGE_KEY, key);
+  }
 }
 
 export function getPreferredModel() {
+  if (typeof window === 'undefined' || !window.localStorage) return MODELS[0];
   return localStorage.getItem(MODEL_KEY) || MODELS[0];
 }
 
 export function savePreferredModel(model) {
-  localStorage.setItem(MODEL_KEY, model);
+  if (typeof window !== 'undefined' && window.localStorage) {
+    localStorage.setItem(MODEL_KEY, model);
+  }
 }
 
 export function isConfigured() {

@@ -2,7 +2,7 @@ import * as XLSX from 'xlsx';
 
 /**
  * Universal accounting report parser supporting:
- * - Native XLSX / XLS / XLSB
+ * - Native XLSX / XLS / XLSB (via SheetJS)
  * - Domínio HTML table reports (.xls/.xlsx) in Windows-1252 / Latin1 / UTF-8
  * - XML Spreadsheet 2003 (.xml/.xls)
  * - CSV / TSV with semicolon/tab delimiter
@@ -113,80 +113,135 @@ function readAsTextWithEncoding(file, encoding = 'windows-1252') {
   });
 }
 
+/**
+ * Transaction Anchor Algorithm:
+ * Scans the raw matrix to find where data rows (dates + amounts + descriptions) begin,
+ * then accurately pinpoints the header row and maps all columns.
+ */
 export function processRawMatrix(data) {
   if (!data || !Array.isArray(data) || data.length === 0) {
-    return { headers: [], rows: [], rawMatrix: [] };
+    return { headers: [], rows: [], rawMatrix: [], samples: {}, headerRowIdx: 0 };
   }
 
+  // Filter out completely empty rows
   const cleanData = data.filter(row => Array.isArray(row) && row.some(c => c !== null && c !== undefined && String(c).trim() !== ''));
-  if (cleanData.length === 0) return { headers: [], rows: [], rawMatrix: [] };
+  if (cleanData.length === 0) return { headers: [], rows: [], rawMatrix: [], samples: {}, headerRowIdx: 0 };
 
+  // Calculate max row width
   let maxCols = 0;
   for (const row of cleanData) {
     if (row.length > maxCols) maxCols = row.length;
   }
 
-  const headerKeywords = ['DATA', 'DT', 'VALOR', 'VLR', 'HISTORICO', 'HIST', 'DEBITO', 'DEB', 'CREDITO', 'CRED', 'LANCAMENTO', 'LCTO', 'DOCUMENTO', 'DOC', 'SALDO', 'MOVIMENTO', 'COMPLEMENTO', 'FORNECEDOR', 'NOME', 'DESCRICAO', 'LOTE'];
-  const excludeKeywords = ['TOTAL GERAL', 'TOTAL DO DIA', 'TOTAL DA CONTA', 'SUBTOTAL', 'SALDO ANTERIOR', 'SALDO ATUAL', 'SALDO FINAL', 'DEMONSTRATIVO', 'LIVRO RAZAO', 'EMPRESA:', 'PERIODO:'];
+  // 1. Transaction Anchor Search: find the first row that has a valid date in column 0 or 1
+  let firstTransactionRowIdx = -1;
+  let dateColIdx = 0;
 
-  let headerRowIdx = -1;
-  let bestHeaderScore = 0;
-
-  const scanLimit = Math.min(cleanData.length, 40);
-
-  for (let i = 0; i < scanLimit; i++) {
+  for (let i = 0; i < cleanData.length; i++) {
     const row = cleanData[i];
-    const rowText = row.map(c => String(c || '')).join(' ').toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-
-    if (excludeKeywords.some(k => rowText.includes(k))) {
-      continue;
-    }
-
-    let keywordCount = 0;
-
-    for (const cell of row) {
-      if (cell !== undefined && cell !== null && String(cell).trim() !== '') {
-        const cellStr = String(cell).trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-        if (headerKeywords.some(k => cellStr === k || cellStr.startsWith(k) || cellStr.endsWith(k))) {
-          keywordCount += 2;
-        } else if (headerKeywords.some(k => cellStr.includes(k))) {
-          keywordCount += 1;
-        }
-      }
-    }
-
-    if (keywordCount >= 2 && keywordCount > bestHeaderScore) {
-      if (i < cleanData.length - 1) {
-        bestHeaderScore = keywordCount;
-        headerRowIdx = i;
-      }
+    // Check column 0 (standard) or column 1
+    if (parseDate(row[0])) {
+      firstTransactionRowIdx = i;
+      dateColIdx = 0;
+      break;
+    } else if (parseDate(row[1])) {
+      firstTransactionRowIdx = i;
+      dateColIdx = 1;
+      break;
     }
   }
 
-  // Fallback 1: row right before first date
-  if (headerRowIdx === -1) {
-    for (let i = 0; i < cleanData.length; i++) {
+  // 2. Locate Header Row: look backwards from firstTransactionRowIdx for a row with header keywords
+  let headerRowIdx = -1;
+  const headerKeywords = ['DATA', 'DT', 'VALOR', 'VLR', 'HISTORICO', 'HIST', 'DEBITO', 'DEB', 'CREDITO', 'CRED', 'LANCAMENTO', 'LCTO', 'DOCUMENTO', 'DOC', 'SALDO', 'MOVIMENTO', 'LOTE'];
+
+  if (firstTransactionRowIdx > 0) {
+    for (let i = firstTransactionRowIdx - 1; i >= 0; i--) {
       const row = cleanData[i];
-      const hasDate = row.some(c => parseDate(c) !== null);
-      if (hasDate) {
-        headerRowIdx = Math.max(0, i - 1);
+      let matches = 0;
+      for (const cell of row) {
+        if (cell !== null && cell !== undefined && String(cell).trim() !== '') {
+          const cellStr = String(cell).trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          if (headerKeywords.some(k => cellStr === k || cellStr.startsWith(k) || cellStr.includes(k))) {
+            matches++;
+          }
+        }
+      }
+      if (matches >= 2) {
+        headerRowIdx = i;
         break;
       }
     }
   }
 
-  // Fallback 2: row 0
+  // Fallback if not found by looking backwards: scan top 20 rows
   if (headerRowIdx === -1) {
-    headerRowIdx = 0;
+    let bestScore = 0;
+    for (let i = 0; i < Math.min(cleanData.length, 25); i++) {
+      const row = cleanData[i];
+      let matches = 0;
+      for (const cell of row) {
+        if (cell !== null && cell !== undefined && String(cell).trim() !== '') {
+          const cellStr = String(cell).trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          if (headerKeywords.some(k => cellStr === k || cellStr.startsWith(k) || cellStr.includes(k))) {
+            matches++;
+          }
+        }
+      }
+      if (matches >= 2 && matches > bestScore) {
+        bestScore = matches;
+        headerRowIdx = i;
+      }
+    }
   }
 
+  if (headerRowIdx === -1) {
+    headerRowIdx = firstTransactionRowIdx > 0 ? firstTransactionRowIdx - 1 : 0;
+  }
+
+  // 3. Build descriptive header names
   const rawHeaders = cleanData[headerRowIdx] || [];
   const headers = [];
   const seenHeaders = {};
+  const samples = {};
+
+  // Find sample values for each column from transaction rows
+  const scanStart = firstTransactionRowIdx !== -1 ? firstTransactionRowIdx : headerRowIdx + 1;
+  for (let j = 0; j < maxCols; j++) {
+    let sampleVal = null;
+    for (let i = scanStart; i < Math.min(cleanData.length, scanStart + 20); i++) {
+      const cell = cleanData[i]?.[j];
+      if (cell !== null && cell !== undefined && String(cell).trim() !== '') {
+        sampleVal = String(cell).trim();
+        break;
+      }
+    }
+    samples[j] = sampleVal;
+  }
+
+  // Standard Domínio position names if cell header is empty
+  const defaultDominioCols = {
+    0: 'Data',
+    1: 'Lote',
+    2: 'Histórico',
+    7: 'Cta.C.Part.',
+    8: 'Débito',
+    9: 'Crédito',
+    12: 'Saldo-Exercício'
+  };
 
   for (let j = 0; j < maxCols; j++) {
     let h = String(rawHeaders[j] || '').trim();
-    if (!h) h = `Coluna_${j + 1}`;
+
+    // If header cell is empty, check if it's a known Domínio column position or use sample
+    if (!h) {
+      if (defaultDominioCols[j] && samples[j]) {
+        h = defaultDominioCols[j];
+      } else {
+        h = `Coluna_${j + 1}`;
+      }
+    }
+
     if (seenHeaders[h]) {
       seenHeaders[h]++;
       h = `${h}_${seenHeaders[h]}`;
@@ -196,6 +251,7 @@ export function processRawMatrix(data) {
     headers.push(h);
   }
 
+  // 4. Extract data rows (all rows after headerRowIdx that contain data)
   const rows = [];
   const ignoreRowKeywords = ['TOTAL GERAL', 'TOTAL DO DIA', 'TOTAL DA CONTA', 'SUBTOTAL', 'SALDO ATUAL', 'SALDO FINAL', 'TRANSPORTE', 'A TRANSPORTAR'];
 
@@ -216,10 +272,11 @@ export function processRawMatrix(data) {
       rowObj[headers[j]] = row[j] !== undefined ? row[j] : null;
     }
     rowObj.__rawArray = row;
+    rowObj.__originalRowIdx = i + 1;
     rows.push(rowObj);
   }
 
-  // If no rows parsed after header, treat all cleanData as rows
+  // Fallback if rows is empty: use all cleanData
   if (rows.length === 0 && cleanData.length > 0) {
     for (let i = 0; i < cleanData.length; i++) {
       const row = cleanData[i];
@@ -228,11 +285,20 @@ export function processRawMatrix(data) {
         rowObj[headers[j]] = row[j] !== undefined ? row[j] : null;
       }
       rowObj.__rawArray = row;
+      rowObj.__originalRowIdx = i + 1;
       rows.push(rowObj);
     }
   }
 
-  return { headers, rows, rawMatrix: cleanData, headerRowIdx };
+  return {
+    headers,
+    rows,
+    rawMatrix: cleanData,
+    samples,
+    headerRowIdx,
+    firstTransactionRowIdx,
+    dateColIdx
+  };
 }
 
 export async function parseFile(file) {
