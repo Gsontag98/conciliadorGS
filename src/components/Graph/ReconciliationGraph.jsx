@@ -7,18 +7,19 @@ import SupplierNode from './nodes/SupplierNode';
 import AnimatedEdge from './edges/AnimatedEdge';
 import GraphToolbar from './GraphToolbar';
 import GraphStats from './GraphStats';
+import TableView from './TableView';
 
 const nodeTypes = { bankNode: BankNode, supplierNode: SupplierNode };
 const edgeTypes = { animated: AnimatedEdge };
 
 function GraphInner() {
-  const { reconciliationResult, graphFilters, setSelectedMatch } = useAppStore();
+  const { reconciliationResult, graphFilters, setSelectedMatch, searchQuery } = useAppStore();
   const { fitView } = useReactFlow();
 
   const { nodes, edges } = useMemo(() => {
     if (!reconciliationResult) return { nodes: [], edges: [] };
     
-    const { matches, missingInBank, missingInSupplier } = reconciliationResult;
+    const { matches = [], missingInBank = [], missingInSupplier = [] } = reconciliationResult;
     const n = [];
     const e = [];
     
@@ -27,7 +28,7 @@ function GraphInner() {
     
     matches.forEach(match => {
       match.bankItems.forEach(b => bankItemsMap.set(b.id, { ...b, matched: true, matchPass: match.pass }));
-      match.ledgerItems.forEach(s => supplierItemsMap.set(s.id, { ...s, matched: true, matchPass: match.pass }));
+      (match.ledgerItems || match.supplierItems || []).forEach(s => supplierItemsMap.set(s.id, { ...s, matched: true, matchPass: match.pass }));
     });
     
     if (graphFilters.showUnmatched) {
@@ -35,13 +36,20 @@ function GraphInner() {
       missingInBank.forEach(s => { if (!supplierItemsMap.has(s.id)) supplierItemsMap.set(s.id, { ...s, matched: false }); });
     }
     
-    const bankItems = Array.from(bankItemsMap.values());
-    const supplierItems = Array.from(supplierItemsMap.values());
+    let bankItems = Array.from(bankItemsMap.values());
+    let supplierItems = Array.from(supplierItemsMap.values());
+
+    // Search query filter
+    if (searchQuery.trim()) {
+      const q = searchQuery.toUpperCase().trim();
+      bankItems = bankItems.filter(b => `${b.description || ''} ${b.cnpj || ''} ${b.amount}`.toUpperCase().includes(q));
+      supplierItems = supplierItems.filter(s => `${s.description || ''} ${s.cnpj || ''} ${s.amount}`.toUpperCase().includes(q));
+    }
     
     const NODE_HEIGHT = 90;
-    const NODE_GAP = 12;
+    const NODE_GAP = 14;
     const LEFT_X = 0;
-    const RIGHT_X = 500;
+    const RIGHT_X = 480;
     
     bankItems.forEach((item, i) => {
       n.push({
@@ -78,26 +86,28 @@ function GraphInner() {
       if (graphFilters[passKey] === false) return;
       
       match.bankItems.forEach(b => {
-        match.ledgerItems.forEach(s => {
-          e.push({
-            id: `edge-${b.id}-${s.id}`,
-            source: b.id,
-            target: s.id,
-            type: 'animated',
-            data: {
-              confidence: match.confidence,
-              pass: match.pass,
-              passName: match.passName,
-              notes: match.notes,
-              matchId: match.id,
-            },
-          });
+        (match.ledgerItems || match.supplierItems || []).forEach(s => {
+          if (n.some(node => node.id === b.id) && n.some(node => node.id === s.id)) {
+            e.push({
+              id: `edge-${b.id}-${s.id}`,
+              source: b.id,
+              target: s.id,
+              type: 'animated',
+              data: {
+                confidence: match.confidence,
+                pass: match.pass,
+                passName: match.passName,
+                notes: match.notes,
+                matchId: match.id,
+              },
+            });
+          }
         });
       });
     });
     
     return { nodes: n, edges: e };
-  }, [reconciliationResult, graphFilters]);
+  }, [reconciliationResult, graphFilters, searchQuery]);
 
   const handleEdgeClick = useCallback((event, edge) => {
     if (!reconciliationResult) return;
@@ -108,65 +118,70 @@ function GraphInner() {
   const handleNodeClick = useCallback((event, node) => {
     if (!reconciliationResult) return;
     const match = reconciliationResult.matches.find(m =>
-      m.bankItems.some(b => b.id === node.id) || m.ledgerItems.some(s => s.id === node.id)
+      m.bankItems.some(b => b.id === node.id) || (m.ledgerItems || m.supplierItems || []).some(s => s.id === node.id)
     );
     if (match) setSelectedMatch(match);
   }, [reconciliationResult, setSelectedMatch]);
 
-  const handleFitView = useCallback(() => {
-    fitView({ padding: 0.2, duration: 400 });
-  }, [fitView]);
+  return (
+    <div className="graph-container" style={{ width: '100%', height: 'calc(100vh - 170px)', position: 'relative' }}>
+      <GraphStats />
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
+        onEdgeClick={handleEdgeClick}
+        onNodeClick={handleNodeClick}
+        fitView
+        fitViewOptions={{ padding: 0.25 }}
+        minZoom={0.1}
+        maxZoom={2}
+      >
+        <Background color="var(--border-primary)" gap={20} size={1} />
+        <Controls />
+        <MiniMap
+          nodeStrokeWidth={3}
+          style={{ background: 'var(--bg-card)', border: '1px solid var(--border-secondary)' }}
+        />
+      </ReactFlow>
+    </div>
+  );
+}
 
-  const handleAutoLayout = useCallback(() => {
-    fitView({ padding: 0.2, duration: 400 });
-  }, [fitView]);
+export default function ReconciliationGraph() {
+  const { reconciliationResult, viewMode, setActivePage } = useAppStore();
+
+  const handleFitView = useCallback(() => {}, []);
+  const handleAutoLayout = useCallback(() => {}, []);
 
   if (!reconciliationResult) {
     return (
       <div className="graph-page">
-        <div className="empty-state" style={{ height: '100%' }}>
+        <div className="empty-state" style={{ height: '70vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
           <h3>Nenhuma conciliação realizada</h3>
-          <p>Faça o upload dos razões contábeis na aba Upload para visualizar o grafo de conciliação.</p>
+          <p>Faça o upload dos razões contábeis na aba Upload para visualizar o resultado.</p>
+          <button className="btn btn-primary" style={{ marginTop: 14 }} onClick={() => setActivePage('upload')}>
+            Ir para Upload dos Razões
+          </button>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="graph-page">
+    <div className="graph-page fade-in" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <GraphToolbar onFitView={handleFitView} onAutoLayout={handleAutoLayout} />
-      <div className="graph-container" style={{ width: '100%', height: '100%' }}>
-        <GraphStats />
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          edgeTypes={edgeTypes}
-          onEdgeClick={handleEdgeClick}
-          onNodeClick={handleNodeClick}
-          fitView
-          fitViewOptions={{ padding: 0.3 }}
-          minZoom={0.1}
-          maxZoom={2}
-          defaultEdgeOptions={{ animated: true }}
-        >
-          <Background color="var(--border-secondary)" gap={20} />
-          <Controls />
-          <MiniMap
-            nodeColor={(node) => node.type === 'bankNode' ? '#22c55e' : '#3b82f6'}
-            maskColor="rgba(0,0,0,0.3)"
-            style={{ width: 140, height: 90 }}
-          />
-        </ReactFlow>
-      </div>
+      
+      {viewMode === 'table' ? (
+        <div style={{ padding: '16px 20px', overflowY: 'auto', flex: 1 }}>
+          <TableView />
+        </div>
+      ) : (
+        <ReactFlowProvider>
+          <GraphInner />
+        </ReactFlowProvider>
+      )}
     </div>
-  );
-}
-
-export default function ReconciliationGraph() {
-  return (
-    <ReactFlowProvider>
-      <GraphInner />
-    </ReactFlowProvider>
   );
 }
