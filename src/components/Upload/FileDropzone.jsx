@@ -1,9 +1,10 @@
 import { useState, useRef } from 'react';
-import { Upload, CheckCircle, AlertCircle, Sliders, Terminal } from 'lucide-react';
+import { Upload, CheckCircle, AlertCircle, Sliders, Terminal, Clipboard } from 'lucide-react';
 import { parseFile } from '../../engine/parser.js';
 import { autoDetect, normalizeData } from '../../engine/mapper.js';
 import ColumnMappingModal from './ColumnMappingModal.jsx';
 import DiagnosticModal from './DiagnosticModal.jsx';
+import PasteDataModal from './PasteDataModal.jsx';
 import useAppStore from '../../store/useAppStore.js';
 
 const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
@@ -17,6 +18,7 @@ export default function FileDropzone({ type }) {
   const [diagnostics, setDiagnostics] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isDiagOpen, setIsDiagOpen] = useState(false);
+  const [isPasteOpen, setIsPasteOpen] = useState(false);
 
   const fileInputRef = useRef(null);
   const { setBankFile, setSupplierFile, addToast, bankFile, supplierFile } = useAppStore();
@@ -178,6 +180,19 @@ export default function FileDropzone({ type }) {
             <Upload className="dropzone-icon" size={42} />
             <div className="dropzone-title">{label}</div>
             <div className="dropzone-subtitle">{subtitle} — Arraste ou clique para selecionar (.xls, .xlsx)</div>
+            
+            <div style={{ marginTop: 12, display: 'flex', justifyContent: 'center' }}>
+              <button
+                className="btn btn-secondary"
+                style={{ padding: '6px 12px', fontSize: '0.76rem', background: 'rgba(56, 189, 248, 0.08)', borderColor: 'rgba(56, 189, 248, 0.3)', color: 'var(--accent-primary)' }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsPasteOpen(true);
+                }}
+              >
+                <Clipboard size={13} /> Ou Colar Direto do Excel (Ctrl+V)
+              </button>
+            </div>
           </>
         )}
 
@@ -187,7 +202,17 @@ export default function FileDropzone({ type }) {
               <AlertCircle size={14} style={{ minWidth: 14 }} />
               <span>{error}</span>
             </div>
-            <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+            <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-primary"
+                style={{ padding: '6px 12px', fontSize: '0.75rem' }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsPasteOpen(true);
+                }}
+              >
+                <Clipboard size={14} /> Colar Direto do Excel (Ctrl+V)
+              </button>
               {diagnostics && (
                 <button
                   className="btn btn-secondary"
@@ -198,18 +223,6 @@ export default function FileDropzone({ type }) {
                   }}
                 >
                   <Terminal size={14} /> Ver Diagnóstico
-                </button>
-              )}
-              {rawSheetData && (
-                <button
-                  className="btn btn-primary"
-                  style={{ padding: '6px 12px', fontSize: '0.75rem' }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setIsModalOpen(true);
-                  }}
-                >
-                  <Sliders size={14} /> Mapear Colunas Manualmente
                 </button>
               )}
             </div>
@@ -230,6 +243,12 @@ export default function FileDropzone({ type }) {
         isOpen={isDiagOpen}
         onClose={() => setIsDiagOpen(false)}
         diagnostics={diagnostics || currentStoreFile?.diagnostics}
+      />
+
+      <PasteDataModal
+        isOpen={isPasteOpen}
+        onClose={() => setIsPasteOpen(false)}
+        type={type}
       />
     </>
   );
