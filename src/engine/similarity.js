@@ -3,7 +3,7 @@ const STOP_WORDS = new Set([
   'PGTO', 'PAGTO', 'PAG', 'PAGO', 'PAGAMENTO',
   'REF', 'REFERENTE', 'REFE',
   'TED', 'DOC', 'PIX', 'TRANSF', 'TRANSFERENCIA', 'TEV',
-  'NF', 'NFE', 'NOTA', 'FISCAL', 'DUPLICATA', 'DUP',
+  'NF', 'NFE', 'NOTA', 'FISCAL', 'DUPLICATA', 'DUP', 'DOCUMENTO',
   'DE', 'DO', 'DA', 'DOS', 'DAS', 'E', 'EM', 'POR', 'PARA', 'COM',
   'BANCO', 'SA', 'LTDA', 'ME', 'EPP', 'EIRELI', 'S/A', 'S.A.'
 ]);
@@ -19,7 +19,7 @@ export function normalizeText(text) {
   // Remove stop words
   const words = normalized.split(' ');
   const filteredWords = words.filter(word => !STOP_WORDS.has(word));
-  
+
   return filteredWords.join(' ');
 }
 
@@ -67,7 +67,6 @@ export function jaroWinkler(s1, s2) {
 
   const jaro = (matches / len1 + matches / len2 + (matches - transpositions / 2) / matches) / 3.0;
 
-  // Winkler prefix boost
   let prefix = 0;
   for (let i = 0; i < Math.min(4, Math.min(len1, len2)); i++) {
     if (str1[i] === str2[i]) prefix++;
@@ -104,17 +103,46 @@ export function calculateSimilarity(str1, str2) {
   return (jw * 0.6) + (jaccard * 0.4);
 }
 
+export function extractCnpj(text) {
+  if (!text) return null;
+  // Match formatted CNPJ: 00.000.000/0000-00 or unformatted 14 digits
+  const formatted = String(text).match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/);
+  if (formatted) return formatted[0].replace(/[^\d]/g, '');
+
+  const rawDigits = String(text).match(/\b\d{14}\b/);
+  if (rawDigits) return rawDigits[0];
+
+  return null;
+}
+
 export function extractDocNumbers(text) {
   if (!text) return [];
-  // Extract 3-14 digit numbers
-  const matches = String(text).match(/\b\d{3,14}\b/g) || [];
-  return Array.from(new Set(matches));
+  // Look specifically for DOCUMENTO XXXXX or NF XXXXX or numbers with 3-10 digits (excluding CNPJs)
+  const docExplicit = String(text).match(/(?:DOCUMENTO|DOC|NF|NFE|DUPLICATA|TITULO|TIT)\s*[:#.]?\s*(\d+)/gi);
+  const results = [];
+  if (docExplicit) {
+    docExplicit.forEach(m => {
+      const num = m.replace(/[^\d]/g, '');
+      if (num && num.length >= 3 && num.length <= 10) results.push(num);
+    });
+  }
+
+  // General 3-10 digit numbers
+  const generalNums = String(text).match(/\b\d{3,10}\b/g) || [];
+  generalNums.forEach(num => {
+    // Avoid pure dates like 2026 or 01022026 if possible
+    if (num.length >= 3 && num.length <= 10 && !results.includes(num)) {
+      results.push(num);
+    }
+  });
+
+  return results;
 }
 
 export function shareDocNumber(str1, str2) {
   const docs1 = extractDocNumbers(str1);
   const docs2 = extractDocNumbers(str2);
-  
+
   if (docs1.length === 0 || docs2.length === 0) return false;
 
   for (const doc of docs1) {
