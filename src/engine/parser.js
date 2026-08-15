@@ -28,6 +28,15 @@ function ensureSheetRef(sheet) {
   }
 }
 
+function isBinaryExcel(u8) {
+  if (!u8 || u8.length < 4) return false;
+  // OLE2 / BIFF8 (.xls): D0 CF 11 E0
+  if (u8[0] === 0xD0 && u8[1] === 0xCF && u8[2] === 0x11 && u8[3] === 0xE0) return true;
+  // ZIP / XLSX (.xlsx): 50 4B
+  if (u8[0] === 0x50 && u8[1] === 0x4B) return true;
+  return false;
+}
+
 function parseHtmlTable(htmlText) {
   try {
     const parser = new DOMParser();
@@ -121,6 +130,33 @@ function parseDelimitedText(text) {
     }
     row.push(currentCell.trim());
     return row;
+  });
+}
+
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    if (file.arrayBuffer) {
+      file.arrayBuffer().then(resolve).catch(() => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(file);
+      });
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target.result);
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    }
+  });
+}
+
+function readFileAsBinaryString(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target.result || '');
+    reader.onerror = () => resolve('');
+    reader.readAsBinaryString(file);
   });
 }
 
@@ -319,36 +355,63 @@ export async function parseFile(file) {
   const sheets = {};
   let sheetNames = [];
 
-  // Strategy 1: Read as ArrayBuffer with SheetJS (handles .xlsx, .xls, .xlsb)
-  try {
-    const arrayBuffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(arrayBuffer);
-    const workbook = XLSX.read(bytes, { type: 'array' });
+  const arrayBuffer = await readFileAsArrayBuffer(file);
+  const bytes = new Uint8Array(arrayBuffer);
+  const isBinary = isBinaryExcel(bytes);
 
-    if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
-      sheetNames = workbook.SheetNames;
-      for (const name of sheetNames) {
-        const sheet = workbook.Sheets[name];
-        if (sheet) {
-          // Fix missing or malformed !ref in Domínio .xls exports
-          ensureSheetRef(sheet);
-
-          const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
-          if (Array.isArray(rawData) && rawData.length > 0) {
-            const processed = processRawMatrix(rawData);
-            if (processed.rawMatrix.length > 0) {
-              sheets[name] = processed;
+  // Strategy 1: Binary parsing for XLSX / XLS
+  if (isBinary) {
+    try {
+      const workbook = XLSX.read(bytes, { type: 'array' });
+      if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
+        sheetNames = workbook.SheetNames;
+        for (const name of sheetNames) {
+          const sheet = workbook.Sheets[name];
+          if (sheet) {
+            ensureSheetRef(sheet);
+            const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
+            if (Array.isArray(rawData) && rawData.length > 0) {
+              const processed = processRawMatrix(rawData);
+              if (processed.rawMatrix.length > 0) {
+                sheets[name] = processed;
+              }
             }
           }
         }
       }
+    } catch (err) {
+      console.warn('SheetJS array read error, trying binary string:', err);
     }
-  } catch (err) {
-    console.warn('SheetJS binary parse error:', err);
+
+    // Binary string fallback
+    if (Object.keys(sheets).length === 0) {
+      try {
+        const binStr = await readFileAsBinaryString(file);
+        const workbook = XLSX.read(binStr, { type: 'binary' });
+        if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
+          sheetNames = workbook.SheetNames;
+          for (const name of sheetNames) {
+            const sheet = workbook.Sheets[name];
+            if (sheet) {
+              ensureSheetRef(sheet);
+              const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
+              if (Array.isArray(rawData) && rawData.length > 0) {
+                const processed = processRawMatrix(rawData);
+                if (processed.rawMatrix.length > 0) {
+                  sheets[name] = processed;
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('SheetJS binary string read error:', err);
+      }
+    }
   }
 
-  // Strategy 2: Text reading with Windows-1252 / ISO-8859-1 (for HTML/XML/CSV exports from Domínio)
-  if (Object.keys(sheets).length === 0) {
+  // Strategy 2: Text parsing for HTML / XML / CSV ONLY if NOT a binary file
+  if (!isBinary && Object.keys(sheets).length === 0) {
     let text = await readAsTextWithEncoding(file, 'windows-1252');
     if (!text || text.length === 0) {
       text = await readAsTextWithEncoding(file, 'utf-8');
@@ -372,26 +435,6 @@ export async function parseFile(file) {
         if (csvMatrix.length > 0) {
           sheets['Razão'] = processRawMatrix(csvMatrix);
           sheetNames = ['Razão'];
-        }
-      }
-
-      // Strategy 3: SheetJS string read fallback
-      if (Object.keys(sheets).length === 0) {
-        try {
-          const workbook = XLSX.read(text, { type: 'string' });
-          if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
-            for (const name of workbook.SheetNames) {
-              const sheet = workbook.Sheets[name];
-              ensureSheetRef(sheet);
-              const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
-              const processed = processRawMatrix(rawData);
-              if (processed.rawMatrix.length > 0) {
-                sheets[name] = processed;
-              }
-            }
-          }
-        } catch (e) {
-          console.warn('SheetJS string parse error:', e);
         }
       }
     }
