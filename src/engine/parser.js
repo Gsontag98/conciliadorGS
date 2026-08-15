@@ -1,12 +1,32 @@
 import * as XLSX from 'xlsx';
 
 /**
- * Universal accounting report parser supporting:
- * - Native XLSX / XLS / XLSB (via SheetJS)
- * - Domínio HTML table reports (.xls/.xlsx) in Windows-1252 / Latin1 / UTF-8
- * - XML Spreadsheet 2003 (.xml/.xls)
- * - CSV / TSV with semicolon/tab delimiter
+ * Ensures a worksheet has a valid `!ref` range by scanning its cell keys.
+ * Crucial for Domínio .xls exports where !ref is omitted or malformed.
  */
+function ensureSheetRef(sheet) {
+  if (!sheet) return;
+  const keys = Object.keys(sheet).filter(k => !k.startsWith('!'));
+  if (keys.length === 0) return;
+
+  let minR = Infinity, maxR = 0, minC = Infinity, maxC = 0;
+  for (const k of keys) {
+    try {
+      const decoded = XLSX.utils.decode_cell(k);
+      if (decoded.r < minR) minR = decoded.r;
+      if (decoded.r > maxR) maxR = decoded.r;
+      if (decoded.c < minC) minC = decoded.c;
+      if (decoded.c > maxC) maxC = decoded.c;
+    } catch {}
+  }
+
+  if (minR !== Infinity) {
+    sheet['!ref'] = XLSX.utils.encode_range({
+      s: { r: minR, c: minC },
+      e: { r: maxR, c: maxC }
+    });
+  }
+}
 
 function parseHtmlTable(htmlText) {
   try {
@@ -115,7 +135,7 @@ function readAsTextWithEncoding(file, encoding = 'windows-1252') {
 
 /**
  * Transaction Anchor Algorithm:
- * Scans the raw matrix to find where data rows (dates + amounts + descriptions) begin,
+ * Scans the raw matrix to find where data rows begin,
  * then accurately pinpoints the header row and maps all columns.
  */
 export function processRawMatrix(data) {
@@ -127,7 +147,6 @@ export function processRawMatrix(data) {
   const cleanData = data.filter(row => Array.isArray(row) && row.some(c => c !== null && c !== undefined && String(c).trim() !== ''));
   if (cleanData.length === 0) return { headers: [], rows: [], rawMatrix: [], samples: {}, headerRowIdx: 0 };
 
-  // Calculate max row width
   let maxCols = 0;
   for (const row of cleanData) {
     if (row.length > maxCols) maxCols = row.length;
@@ -139,7 +158,6 @@ export function processRawMatrix(data) {
 
   for (let i = 0; i < cleanData.length; i++) {
     const row = cleanData[i];
-    // Check column 0 (standard) or column 1
     if (parseDate(row[0])) {
       firstTransactionRowIdx = i;
       dateColIdx = 0;
@@ -174,7 +192,7 @@ export function processRawMatrix(data) {
     }
   }
 
-  // Fallback if not found by looking backwards: scan top 20 rows
+  // Fallback if not found by looking backwards: scan top 25 rows
   if (headerRowIdx === -1) {
     let bestScore = 0;
     for (let i = 0; i < Math.min(cleanData.length, 25); i++) {
@@ -205,7 +223,6 @@ export function processRawMatrix(data) {
   const seenHeaders = {};
   const samples = {};
 
-  // Find sample values for each column from transaction rows
   const scanStart = firstTransactionRowIdx !== -1 ? firstTransactionRowIdx : headerRowIdx + 1;
   for (let j = 0; j < maxCols; j++) {
     let sampleVal = null;
@@ -219,7 +236,6 @@ export function processRawMatrix(data) {
     samples[j] = sampleVal;
   }
 
-  // Standard Domínio position names if cell header is empty
   const defaultDominioCols = {
     0: 'Data',
     1: 'Lote',
@@ -233,7 +249,6 @@ export function processRawMatrix(data) {
   for (let j = 0; j < maxCols; j++) {
     let h = String(rawHeaders[j] || '').trim();
 
-    // If header cell is empty, check if it's a known Domínio column position or use sample
     if (!h) {
       if (defaultDominioCols[j] && samples[j]) {
         h = defaultDominioCols[j];
@@ -251,7 +266,7 @@ export function processRawMatrix(data) {
     headers.push(h);
   }
 
-  // 4. Extract data rows (all rows after headerRowIdx that contain data)
+  // 4. Extract data rows
   const rows = [];
   const ignoreRowKeywords = ['TOTAL GERAL', 'TOTAL DO DIA', 'TOTAL DA CONTA', 'SUBTOTAL', 'SALDO ATUAL', 'SALDO FINAL', 'TRANSPORTE', 'A TRANSPORTAR'];
 
@@ -276,7 +291,6 @@ export function processRawMatrix(data) {
     rows.push(rowObj);
   }
 
-  // Fallback if rows is empty: use all cleanData
   if (rows.length === 0 && cleanData.length > 0) {
     for (let i = 0; i < cleanData.length; i++) {
       const row = cleanData[i];
@@ -316,6 +330,9 @@ export async function parseFile(file) {
       for (const name of sheetNames) {
         const sheet = workbook.Sheets[name];
         if (sheet) {
+          // Fix missing or malformed !ref in Domínio .xls exports
+          ensureSheetRef(sheet);
+
           const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
           if (Array.isArray(rawData) && rawData.length > 0) {
             const processed = processRawMatrix(rawData);
@@ -365,6 +382,7 @@ export async function parseFile(file) {
           if (workbook && workbook.SheetNames && workbook.SheetNames.length > 0) {
             for (const name of workbook.SheetNames) {
               const sheet = workbook.Sheets[name];
+              ensureSheetRef(sheet);
               const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, blankrows: false });
               const processed = processRawMatrix(rawData);
               if (processed.rawMatrix.length > 0) {
